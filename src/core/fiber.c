@@ -21,7 +21,7 @@
 */
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
 #include "fiber.h"
 #include "state.h"
 #include "gc.h"
@@ -35,6 +35,7 @@ static void fiber_reset(JanetFiber *fiber) {
     fiber->stacktop = JANET_FRAME_SIZE;
     fiber->child = NULL;
     fiber->flags = JANET_FIBER_MASK_YIELD;
+    fiber->env = NULL;
     janet_fiber_set_status(fiber, JANET_STATUS_NEW);
 }
 
@@ -49,6 +50,7 @@ static JanetFiber *fiber_alloc(int32_t capacity) {
     if (NULL == data) {
         JANET_OUT_OF_MEMORY;
     }
+    janet_vm_next_collection += sizeof(Janet) * capacity;
     fiber->data = data;
     return fiber;
 }
@@ -85,19 +87,27 @@ void janet_fiber_setcapacity(JanetFiber *fiber, int32_t n) {
     fiber->capacity = n;
 }
 
+/* Grow fiber if needed */
+static void janet_fiber_grow(JanetFiber *fiber, int32_t needed) {
+    int32_t cap = needed > (INT32_MAX / 2) ? INT32_MAX : 2 * needed;
+    janet_fiber_setcapacity(fiber, cap);
+}
+
 /* Push a value on the next stack frame */
 void janet_fiber_push(JanetFiber *fiber, Janet x) {
+    if (fiber->stacktop == INT32_MAX) janet_panic("stack overflow");
     if (fiber->stacktop >= fiber->capacity) {
-        janet_fiber_setcapacity(fiber, 2 * fiber->stacktop);
+        janet_fiber_grow(fiber, fiber->stacktop);
     }
     fiber->data[fiber->stacktop++] = x;
 }
 
 /* Push 2 values on the next stack frame */
 void janet_fiber_push2(JanetFiber *fiber, Janet x, Janet y) {
+    if (fiber->stacktop >= INT32_MAX - 1) janet_panic("stack overflow");
     int32_t newtop = fiber->stacktop + 2;
     if (newtop > fiber->capacity) {
-        janet_fiber_setcapacity(fiber, 2 * newtop);
+        janet_fiber_grow(fiber, newtop);
     }
     fiber->data[fiber->stacktop] = x;
     fiber->data[fiber->stacktop + 1] = y;
@@ -106,9 +116,10 @@ void janet_fiber_push2(JanetFiber *fiber, Janet x, Janet y) {
 
 /* Push 3 values on the next stack frame */
 void janet_fiber_push3(JanetFiber *fiber, Janet x, Janet y, Janet z) {
+    if (fiber->stacktop >= INT32_MAX - 2) janet_panic("stack overflow");
     int32_t newtop = fiber->stacktop + 3;
     if (newtop > fiber->capacity) {
-        janet_fiber_setcapacity(fiber, 2 * newtop);
+        janet_fiber_grow(fiber, newtop);
     }
     fiber->data[fiber->stacktop] = x;
     fiber->data[fiber->stacktop + 1] = y;
@@ -118,12 +129,23 @@ void janet_fiber_push3(JanetFiber *fiber, Janet x, Janet y, Janet z) {
 
 /* Push an array on the next stack frame */
 void janet_fiber_pushn(JanetFiber *fiber, const Janet *arr, int32_t n) {
+    if (fiber->stacktop > INT32_MAX - n) janet_panic("stack overflow");
     int32_t newtop = fiber->stacktop + n;
     if (newtop > fiber->capacity) {
-        janet_fiber_setcapacity(fiber, 2 * newtop);
+        janet_fiber_grow(fiber, newtop);
     }
     memcpy(fiber->data + fiber->stacktop, arr, n * sizeof(Janet));
     fiber->stacktop = newtop;
+}
+
+/* Create a struct with n values. If n is odd, the last value is ignored. */
+static Janet make_struct_n(const Janet *args, int32_t n) {
+    int32_t i = 0;
+    JanetKV *st = janet_struct_begin(n & (~1));
+    for (; i < n; i += 2) {
+        janet_struct_put(st, args[i], args[i + 1]);
+    }
+    return janet_wrap_struct(janet_struct_end(st));
 }
 
 /* Push a stack frame to a fiber */
@@ -138,11 +160,8 @@ int janet_fiber_funcframe(JanetFiber *fiber, JanetFunction *func) {
     int32_t next_arity = fiber->stacktop - fiber->stackstart;
 
     /* Check strict arity before messing with state */
-    if (func->def->flags & JANET_FUNCDEF_FLAG_FIXARITY) {
-        if (func->def->arity != next_arity) {
-            return 1;
-        }
-    }
+    if (next_arity < func->def->min_arity) return 1;
+    if (next_arity > func->def->max_arity) return 1;
 
     if (fiber->capacity < nextstacktop) {
         janet_fiber_setcapacity(fiber, 2 * nextstacktop);
@@ -166,12 +185,19 @@ int janet_fiber_funcframe(JanetFiber *fiber, JanetFunction *func) {
     /* Check varargs */
     if (func->def->flags & JANET_FUNCDEF_FLAG_VARARG) {
         int32_t tuplehead = fiber->frame + func->def->arity;
+        int st = func->def->flags & JANET_FUNCDEF_FLAG_STRUCTARG;
         if (tuplehead >= oldtop) {
-            fiber->data[tuplehead] = janet_wrap_tuple(janet_tuple_n(NULL, 0));
+            fiber->data[tuplehead] = st
+                                     ? make_struct_n(NULL, 0)
+                                     : janet_wrap_tuple(janet_tuple_n(NULL, 0));
         } else {
-            fiber->data[tuplehead] = janet_wrap_tuple(janet_tuple_n(
-                fiber->data + tuplehead,
-                oldtop - tuplehead));
+            fiber->data[tuplehead] = st
+                                     ? make_struct_n(
+                                         fiber->data + tuplehead,
+                                         oldtop - tuplehead)
+                                     : janet_wrap_tuple(janet_tuple_n(
+                                                 fiber->data + tuplehead,
+                                                 oldtop - tuplehead));
         }
     }
 
@@ -186,6 +212,7 @@ static void janet_env_detach(JanetFuncEnv *env) {
     if (env) {
         size_t s = sizeof(Janet) * env->length;
         Janet *vmem = malloc(s);
+        janet_vm_next_collection += (uint32_t) s;
         if (NULL == vmem) {
             JANET_OUT_OF_MEMORY;
         }
@@ -204,11 +231,8 @@ int janet_fiber_funcframe_tail(JanetFiber *fiber, JanetFunction *func) {
     int32_t stacksize;
 
     /* Check strict arity before messing with state */
-    if (func->def->flags & JANET_FUNCDEF_FLAG_FIXARITY) {
-        if (func->def->arity != next_arity) {
-            return 1;
-        }
-    }
+    if (next_arity < func->def->min_arity) return 1;
+    if (next_arity > func->def->max_arity) return 1;
 
     if (fiber->capacity < nextstacktop) {
         janet_fiber_setcapacity(fiber, 2 * nextstacktop);
@@ -225,14 +249,21 @@ int janet_fiber_funcframe_tail(JanetFiber *fiber, JanetFunction *func) {
     /* Check varargs */
     if (func->def->flags & JANET_FUNCDEF_FLAG_VARARG) {
         int32_t tuplehead = fiber->stackstart + func->def->arity;
+        int st = func->def->flags & JANET_FUNCDEF_FLAG_STRUCTARG;
         if (tuplehead >= fiber->stacktop) {
             if (tuplehead >= fiber->capacity) janet_fiber_setcapacity(fiber, 2 * (tuplehead + 1));
             for (i = fiber->stacktop; i < tuplehead; ++i) fiber->data[i] = janet_wrap_nil();
-            fiber->data[tuplehead] = janet_wrap_tuple(janet_tuple_n(NULL, 0));
+            fiber->data[tuplehead] = st
+                                     ? make_struct_n(NULL, 0)
+                                     : janet_wrap_tuple(janet_tuple_n(NULL, 0));
         } else {
-            fiber->data[tuplehead] = janet_wrap_tuple(janet_tuple_n(
-                fiber->data + tuplehead,
-                fiber->stacktop - tuplehead));
+            fiber->data[tuplehead] = st
+                                     ? make_struct_n(
+                                         fiber->data + tuplehead,
+                                         fiber->stacktop - tuplehead)
+                                     : janet_wrap_tuple(janet_tuple_n(
+                                                 fiber->data + tuplehead,
+                                                 fiber->stacktop - tuplehead));
         }
         stacksize = tuplehead - fiber->stackstart + 1;
     } else {
@@ -297,16 +328,41 @@ void janet_fiber_popframe(JanetFiber *fiber) {
     fiber->frame = frame->prevframe;
 }
 
+JanetFiberStatus janet_fiber_status(JanetFiber *f) {
+    return ((f)->flags & JANET_FIBER_STATUS_MASK) >> JANET_FIBER_STATUS_OFFSET;
+}
+
+JanetFiber *janet_current_fiber(void) {
+    return janet_vm_fiber;
+}
+
 /* CFuns */
+
+static Janet cfun_fiber_getenv(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    JanetFiber *fiber = janet_getfiber(argv, 0);
+    return fiber->env ?
+           janet_wrap_table(fiber->env) :
+           janet_wrap_nil();
+}
+
+static Janet cfun_fiber_setenv(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 2);
+    JanetFiber *fiber = janet_getfiber(argv, 0);
+    if (janet_checktype(argv[1], JANET_NIL)) {
+        fiber->env = NULL;
+    } else {
+        fiber->env = janet_gettable(argv, 1);
+    }
+    return argv[0];
+}
 
 static Janet cfun_fiber_new(int32_t argc, Janet *argv) {
     janet_arity(argc, 1, 2);
     JanetFunction *func = janet_getfunction(argv, 0);
     JanetFiber *fiber;
-    if (func->def->flags & JANET_FUNCDEF_FLAG_FIXARITY) {
-        if (func->def->arity != 0) {
-            janet_panic("expected nullary function in fiber constructor");
-        }
+    if (func->def->min_arity != 0) {
+        janet_panic("expected nullary function in fiber constructor");
     }
     fiber = janet_fiber(func, 64, 0, NULL);
     if (argc == 2) {
@@ -341,6 +397,19 @@ static Janet cfun_fiber_new(int32_t argc, Janet *argv) {
                     case 'y':
                         fiber->flags |= JANET_FIBER_MASK_YIELD;
                         break;
+                    case 'i':
+                        if (!janet_vm_fiber->env) {
+                            janet_vm_fiber->env = janet_table(0);
+                        }
+                        fiber->env = janet_vm_fiber->env;
+                        break;
+                    case 'p':
+                        if (!janet_vm_fiber->env) {
+                            janet_vm_fiber->env = janet_table(0);
+                        }
+                        fiber->env = janet_table(0);
+                        fiber->env->proto = janet_vm_fiber->env;
+                        break;
                 }
             }
         }
@@ -351,8 +420,7 @@ static Janet cfun_fiber_new(int32_t argc, Janet *argv) {
 static Janet cfun_fiber_status(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
     JanetFiber *fiber = janet_getfiber(argv, 0);
-    uint32_t s = (fiber->flags & JANET_FIBER_STATUS_MASK) >>
-        JANET_FIBER_STATUS_OFFSET;
+    uint32_t s = janet_fiber_status(fiber);
     return janet_ckeywordv(janet_status_names[s]);
 }
 
@@ -382,51 +450,67 @@ static Janet cfun_fiber_setmaxstack(int32_t argc, Janet *argv) {
 static const JanetReg fiber_cfuns[] = {
     {
         "fiber/new", cfun_fiber_new,
-        JDOC("(fiber/new func [,sigmask])\n\n"
-                "Create a new fiber with function body func. Can optionally "
-                "take a set of signals to block from the current parent fiber "
-                "when called. The mask is specified as a keyword where each character "
-                "is used to indicate a signal to block. The default sigmask is :y. "
-                "For example, \n\n"
-                "\t(fiber/new myfun :e123)\n\n"
-                "blocks error signals and user signals 1, 2 and 3. The signals are "
-                "as follows: \n\n"
-                "\ta - block all signals\n"
-                "\td - block debug signals\n"
-                "\te - block error signals\n"
-                "\tu - block user signals\n"
-                "\ty - block yield signals\n"
-                "\t0-9 - block a specific user signal")
+        JDOC("(fiber/new func &opt sigmask)\n\n"
+             "Create a new fiber with function body func. Can optionally "
+             "take a set of signals to block from the current parent fiber "
+             "when called. The mask is specified as a keyword where each character "
+             "is used to indicate a signal to block. The default sigmask is :y. "
+             "For example, \n\n"
+             "\t(fiber/new myfun :e123)\n\n"
+             "blocks error signals and user signals 1, 2 and 3. The signals are "
+             "as follows: \n\n"
+             "\ta - block all signals\n"
+             "\td - block debug signals\n"
+             "\te - block error signals\n"
+             "\tu - block user signals\n"
+             "\ty - block yield signals\n"
+             "\t0-9 - block a specific user signal\n\n"
+             "The sigmask argument also can take environment flags. If any mutually "
+             "exclusive flags are present, the last flag takes precedence.\n\n"
+             "\ti - inherit the environment from the current fiber\n"
+             "\tp - the environment table's prototype is the current environment table")
     },
     {
         "fiber/status", cfun_fiber_status,
         JDOC("(fiber/status fib)\n\n"
-                "Get the status of a fiber. The status will be one of:\n\n"
-                "\t:dead - the fiber has finished\n"
-                "\t:error - the fiber has errored out\n"
-                "\t:debug - the fiber is suspended in debug mode\n"
-                "\t:pending - the fiber has been yielded\n"
-                "\t:user(0-9) - the fiber is suspended by a user signal\n"
-                "\t:alive - the fiber is currently running and cannot be resumed\n"
-                "\t:new - the fiber has just been created and not yet run")
+             "Get the status of a fiber. The status will be one of:\n\n"
+             "\t:dead - the fiber has finished\n"
+             "\t:error - the fiber has errored out\n"
+             "\t:debug - the fiber is suspended in debug mode\n"
+             "\t:pending - the fiber has been yielded\n"
+             "\t:user(0-9) - the fiber is suspended by a user signal\n"
+             "\t:alive - the fiber is currently running and cannot be resumed\n"
+             "\t:new - the fiber has just been created and not yet run")
     },
     {
         "fiber/current", cfun_fiber_current,
         JDOC("(fiber/current)\n\n"
-                "Returns the currently running fiber.")
+             "Returns the currently running fiber.")
     },
     {
         "fiber/maxstack", cfun_fiber_maxstack,
         JDOC("(fiber/maxstack fib)\n\n"
-                "Gets the maximum stack size in janet values allowed for a fiber. While memory for "
-                "the fiber's stack is not allocated up front, the fiber will not allocated more "
-                "than this amount and will throw a stack-overflow error if more memory is needed. ")
+             "Gets the maximum stack size in janet values allowed for a fiber. While memory for "
+             "the fiber's stack is not allocated up front, the fiber will not allocated more "
+             "than this amount and will throw a stack-overflow error if more memory is needed. ")
     },
     {
         "fiber/setmaxstack", cfun_fiber_setmaxstack,
         JDOC("(fiber/setmaxstack fib maxstack)\n\n"
-                "Sets the maximum stack size in janet values for a fiber. By default, the "
-                "maximum stack size is usually 8192.")
+             "Sets the maximum stack size in janet values for a fiber. By default, the "
+             "maximum stack size is usually 8192.")
+    },
+    {
+        "fiber/getenv", cfun_fiber_getenv,
+        JDOC("(fiber/getenv fiber)\n\n"
+             "Gets the environment for a fiber. Returns nil if no such table is "
+             "set yet.")
+    },
+    {
+        "fiber/setenv", cfun_fiber_setenv,
+        JDOC("(fiber/setenv fiber table)\n\n"
+             "Sets the environment table for a fiber. Set to nil to remove the current "
+             "environment.")
     },
     {NULL, NULL, NULL}
 };

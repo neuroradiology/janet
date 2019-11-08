@@ -29,7 +29,12 @@ may require changes before being merged.
   run tests with `make test`. If you want to add a new test suite, simply add a file to
   the test folder and make sure it is run when`make test` is invoked.
 * Be consistent with the style. For C this means follow the indentation and style in
-  other files (files have MIT license at top, 4 spaces indentation, no trailing whitespace, cuddled brackets, etc.)
+  other files (files have MIT license at top, 4 spaces indentation, no trailing
+          whitespace, cuddled brackets, etc.) Use `make format` to
+  automatically format your C code with
+  [astyle](http://astyle.sourceforge.net/astyle.html). You will probably need
+  to install this, but it can be installed with most package managers.
+
   For janet code, the use lisp indentation with 2 spaces. One can use janet.vim to
   do this indentation, or approximate as close as possible.
 
@@ -39,7 +44,6 @@ For changes to the VM and Core code, you will probably need to know C. Janet is 
 a subset of C99 that works with Microsoft Visual C++. This means most of C99 but with the following
 omissions.
 
-* No Variable Length Arrays (yes these may work in newer MSVC compilers)
 * No `restrict` 
 * Certain functions in the standard library are not always available
 
@@ -50,6 +54,11 @@ this is not a priority.
 Code should compile warning free and run valgrind clean. I find that these two criteria are some
 of the easiest ways to protect against a large number of bugs in an unsafe language like C. To check for
 valgrind errors, run `make valtest` and check the output for undefined or flagged behavior.
+
+### Formatting
+
+Use [astyle](http://astyle.sourceforge.net/astyle.html) via `make format` to
+ensure a consistent code style for C.
 
 ## Janet style
 

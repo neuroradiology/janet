@@ -4,6 +4,7 @@ dst
 janet
 !*/**/janet
 /build
+/builddir
 /Build
 /Release
 /Debug
@@ -11,6 +12,16 @@ janet
 /src/include/generated/*.h
 janet-*.tar.gz
 dist
+
+# VSCode
+.vscode
+
+# Eclipse
+.project
+.cproject
+
+# Gnome Builder
+.buildconfig
 
 # Local directory for testing
 local

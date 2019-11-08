@@ -20,15 +20,15 @@
 * IN THE SOFTWARE.
 */
 
-#include <janet/janet.h>
+#include <janet.h>
 #include <assert.h>
 
-int main() {
+#include "tests.h"
+
+int buffer_test() {
 
     int i;
     JanetBuffer *buffer1, *buffer2;
-
-    janet_init();
 
     buffer1 = janet_buffer(100);
     buffer2 = janet_buffer(0);
@@ -57,8 +57,6 @@ int main() {
     for (i = 0; i < buffer1->count; i++) {
         assert(buffer1->data[i] == buffer2->data[i]);
     }
-
-    janet_deinit();
 
     return 0;
 }

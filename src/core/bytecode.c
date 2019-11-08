@@ -21,8 +21,9 @@
 */
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
 #include "gc.h"
+#include "util.h"
 #endif
 
 /* Look up table for instructions */
@@ -78,6 +79,7 @@ enum JanetInstructionType janet_instructions[JOP_INSTRUCTION_COUNT] = {
     JINT_S, /* JOP_TAILCALL, */
     JINT_SSS, /* JOP_RESUME, */
     JINT_SSU, /* JOP_SIGNAL, */
+    JINT_SSS, /* JOP_PROPAGATE */
     JINT_SSS, /* JOP_GET, */
     JINT_SSS, /* JOP_PUT, */
     JINT_SSU, /* JOP_GET_INDEX, */
@@ -85,10 +87,11 @@ enum JanetInstructionType janet_instructions[JOP_INSTRUCTION_COUNT] = {
     JINT_SS, /* JOP_LENGTH */
     JINT_S, /* JOP_MAKE_ARRAY */
     JINT_S, /* JOP_MAKE_BUFFER */
-    JINT_S, /* JOP_MAKE_TUPLE */
+    JINT_S, /* JOP_MAKE_STRING */
     JINT_S, /* JOP_MAKE_STRUCT */
     JINT_S, /* JOP_MAKE_TABLE */
-    JINT_S, /* JOP_MAKE_STRING */
+    JINT_S, /* JOP_MAKE_TUPLE */
+    JINT_S, /* JOP_MAKE_BRACKET_TUPLE */
     JINT_SSS, /* JOP_NUMERIC_LESS_THAN */
     JINT_SSS, /* JOP_NUMERIC_LESS_THAN_EQUAL */
     JINT_SSS, /* JOP_NUMERIC_GREATER_THAN */
@@ -118,72 +121,62 @@ int32_t janet_verify(JanetFuncDef *def) {
         switch (type) {
             case JINT_0:
                 continue;
-            case JINT_S:
-                {
-                    if ((int32_t)(instr >> 8) >= sc) return 4;
-                    continue;
-                }
+            case JINT_S: {
+                if ((int32_t)(instr >> 8) >= sc) return 4;
+                continue;
+            }
             case JINT_SI:
             case JINT_SU:
-            case JINT_ST:
-                {
-                    if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
-                    continue;
-                }
-            case JINT_L:
-                {
-                    int32_t jumpdest = i + (((int32_t)instr) >> 8);
-                    if (jumpdest < 0 || jumpdest >= def->bytecode_length) return 5;
-                    continue;
-                }
-            case JINT_SS:
-                {
-                    if ((int32_t)((instr >> 8) & 0xFF) >= sc ||
+            case JINT_ST: {
+                if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
+                continue;
+            }
+            case JINT_L: {
+                int32_t jumpdest = i + (((int32_t)instr) >> 8);
+                if (jumpdest < 0 || jumpdest >= def->bytecode_length) return 5;
+                continue;
+            }
+            case JINT_SS: {
+                if ((int32_t)((instr >> 8) & 0xFF) >= sc ||
                         (int32_t)(instr >> 16) >= sc) return 4;
-                    continue;
-                }
+                continue;
+            }
             case JINT_SSI:
-            case JINT_SSU:
-                {
-                    if ((int32_t)((instr >> 8) & 0xFF) >= sc ||
+            case JINT_SSU: {
+                if ((int32_t)((instr >> 8) & 0xFF) >= sc ||
                         (int32_t)((instr >> 16) & 0xFF) >= sc) return 4;
-                    continue;
-                }
-            case JINT_SL:
-                {
-                    int32_t jumpdest = i + (((int32_t)instr) >> 16);
-                    if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
-                    if (jumpdest < 0 || jumpdest >= def->bytecode_length) return 5;
-                    continue;
-                }
-            case JINT_SSS:
-                {
-                    if (((int32_t)(instr >> 8) & 0xFF) >= sc ||
+                continue;
+            }
+            case JINT_SL: {
+                int32_t jumpdest = i + (((int32_t)instr) >> 16);
+                if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
+                if (jumpdest < 0 || jumpdest >= def->bytecode_length) return 5;
+                continue;
+            }
+            case JINT_SSS: {
+                if (((int32_t)(instr >> 8) & 0xFF) >= sc ||
                         ((int32_t)(instr >> 16) & 0xFF) >= sc ||
                         ((int32_t)(instr >> 24) & 0xFF) >= sc) return 4;
-                    continue;
-                }
-            case JINT_SD:
-                {
-                    if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
-                    if ((int32_t)(instr >> 16) >= def->defs_length) return 6;
-                    continue;
-                }
-            case JINT_SC:
-                {
-                    if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
-                    if ((int32_t)(instr >> 16) >= def->constants_length) return 7;
-                    continue;
-                }
-            case JINT_SES:
-                {
-                    /* How can we check the last slot index? We need info parent funcdefs. Resort
-                     * to runtime checks for now. Maybe invalid upvalue references could be defaulted
-                     * to nil? (don't commit to this in the long term, though) */
-                    if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
-                    if ((int32_t)((instr >> 16) & 0xFF) >= def->environments_length) return 8;
-                    continue;
-                }
+                continue;
+            }
+            case JINT_SD: {
+                if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
+                if ((int32_t)(instr >> 16) >= def->defs_length) return 6;
+                continue;
+            }
+            case JINT_SC: {
+                if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
+                if ((int32_t)(instr >> 16) >= def->constants_length) return 7;
+                continue;
+            }
+            case JINT_SES: {
+                /* How can we check the last slot index? We need info parent funcdefs. Resort
+                 * to runtime checks for now. Maybe invalid upvalue references could be defaulted
+                 * to nil? (don't commit to this in the long term, though) */
+                if ((int32_t)((instr >> 8) & 0xFF) >= sc) return 4;
+                if ((int32_t)((instr >> 16) & 0xFF) >= def->environments_length) return 8;
+                continue;
+            }
         }
     }
 
@@ -218,6 +211,8 @@ JanetFuncDef *janet_funcdef_alloc() {
     def->flags = 0;
     def->slotcount = 0;
     def->arity = 0;
+    def->min_arity = 0;
+    def->max_arity = INT32_MAX;
     def->source = NULL;
     def->sourcemap = NULL;
     def->name = NULL;

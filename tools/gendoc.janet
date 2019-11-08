@@ -74,7 +74,7 @@
   "Generate title"
   []
   (string "<h1>Janet Core API</h1>"
-          "<p>Version " janet/version  "-" janet/build "</p>"
+          "<p>Version " janet/version "-" janet/build "</p>"
           "<p>Generated "
           (nice-date)
           "</p>"
@@ -103,7 +103,8 @@
 
 # Generate parts and print them to stdout
 (def parts (seq [[k entry]
-                 :in (sort (pairs (table/getproto *env*)))
+                 :in (sort (pairs (table/getproto (fiber/getenv (fiber/current)))))
+                 :when (symbol? k)
                  :when (and (get entry :doc) (not (get entry :private)))]
                 (emit-item k entry)))
 (print

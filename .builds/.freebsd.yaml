@@ -1,11 +1,11 @@
 image: freebsd/latest
 packages:
   - gmake
-  - gcc
-sources:
-  - https://github.com/janet-lang/janet.git
 tasks:
   - build: |
       cd janet
-      gmake CC=gcc
-      gmake test CC=gcc
+      gmake
+      gmake test
+      sudo gmake install
+      gmake test-install
+      gmake test-amalg

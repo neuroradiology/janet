@@ -21,7 +21,7 @@
 */
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
 #include "emit.h"
 #include "vector.h"
 #include "regalloc.h"
@@ -78,32 +78,31 @@ static void janetc_loadconst(JanetCompiler *c, Janet k, int32_t reg) {
         case JANET_NIL:
             janetc_emit(c, (reg << 8) | JOP_LOAD_NIL);
             break;
-        case JANET_TRUE:
-            janetc_emit(c, (reg << 8) | JOP_LOAD_TRUE);
+        case JANET_BOOLEAN:
+            janetc_emit(c, (reg << 8) |
+                        (janet_unwrap_boolean(k) ? JOP_LOAD_TRUE : JOP_LOAD_FALSE));
             break;
-        case JANET_FALSE:
-            janetc_emit(c, (reg << 8) | JOP_LOAD_FALSE);
-            break;
-        case JANET_NUMBER:
-            {
-                double dval = janet_unwrap_number(k);
-                int32_t i = (int32_t) dval;
-                if (dval != i || !(dval >= INT16_MIN && dval <= INT16_MAX))
-                    goto do_constant;
-                janetc_emit(c,
-                        (i << 16) |
+        case JANET_NUMBER: {
+            double dval = janet_unwrap_number(k);
+            if (dval < INT16_MIN || dval > INT16_MAX)
+                goto do_constant;
+            int32_t i = (int32_t) dval;
+            if (dval != i)
+                goto do_constant;
+            uint32_t iu = (uint32_t)i;
+            janetc_emit(c,
+                        (iu << 16) |
                         (reg << 8) |
                         JOP_LOAD_INTEGER);
-                break;
-            }
+            break;
+        }
         default:
-        do_constant:
-            {
+        do_constant: {
                 int32_t cindex = janetc_const(c, k);
                 janetc_emit(c,
-                        (cindex << 16) |
-                        (reg << 8) |
-                        JOP_LOAD_CONSTANT);
+                            (cindex << 16) |
+                            (reg << 8) |
+                            JOP_LOAD_CONSTANT);
                 break;
             }
     }
@@ -111,53 +110,53 @@ static void janetc_loadconst(JanetCompiler *c, Janet k, int32_t reg) {
 
 /* Move a slot to a near register */
 static void janetc_movenear(JanetCompiler *c,
-        int32_t dest,
-        JanetSlot src) {
+                            int32_t dest,
+                            JanetSlot src) {
     if (src.flags & (JANET_SLOT_CONSTANT | JANET_SLOT_REF)) {
         janetc_loadconst(c, src.constant, dest);
         /* If we also are a reference, deref the one element array */
         if (src.flags & JANET_SLOT_REF) {
             janetc_emit(c,
-                    (dest << 16) |
-                    (dest << 8) |
-                    JOP_GET_INDEX);
+                        (dest << 16) |
+                        (dest << 8) |
+                        JOP_GET_INDEX);
         }
     } else if (src.envindex >= 0) {
         janetc_emit(c,
-                ((uint32_t)(src.index) << 24) |
-                ((uint32_t)(src.envindex) << 16) |
-                ((uint32_t)(dest) << 8) |
-                JOP_LOAD_UPVALUE);
+                    ((uint32_t)(src.index) << 24) |
+                    ((uint32_t)(src.envindex) << 16) |
+                    ((uint32_t)(dest) << 8) |
+                    JOP_LOAD_UPVALUE);
     } else if (src.index > 0xFF || src.index != dest) {
         janetc_emit(c,
-                ((uint32_t)(src.index) << 16) |
-                ((uint32_t)(dest) << 8) |
+                    ((uint32_t)(src.index) << 16) |
+                    ((uint32_t)(dest) << 8) |
                     JOP_MOVE_NEAR);
     }
 }
 
 /* Move a near register to a Slot. */
 static void janetc_moveback(JanetCompiler *c,
-        JanetSlot dest,
-        int32_t src) {
+                            JanetSlot dest,
+                            int32_t src) {
     if (dest.flags & JANET_SLOT_REF) {
         int32_t refreg = janetc_regalloc_temp(&c->scope->ra, JANETC_REGTEMP_5);
         janetc_loadconst(c, dest.constant, refreg);
         janetc_emit(c,
-               (src << 16) |
-               (refreg << 8) |
-               JOP_PUT_INDEX);
+                    (src << 16) |
+                    (refreg << 8) |
+                    JOP_PUT_INDEX);
         janetc_regalloc_freetemp(&c->scope->ra, refreg, JANETC_REGTEMP_5);
     } else if (dest.envindex >= 0) {
         janetc_emit(c,
-                ((uint32_t)(dest.index) << 24) |
-                ((uint32_t)(dest.envindex) << 16) |
-                ((uint32_t)(src) << 8) |
-                JOP_SET_UPVALUE);
+                    ((uint32_t)(dest.index) << 24) |
+                    ((uint32_t)(dest.envindex) << 16) |
+                    ((uint32_t)(src) << 8) |
+                    JOP_SET_UPVALUE);
     } else if (dest.index != src) {
         janetc_emit(c,
-                ((uint32_t)(dest.index) << 16) |
-                ((uint32_t)(src) << 8) |
+                    ((uint32_t)(dest.index) << 16) |
+                    ((uint32_t)(src) << 8) |
                     JOP_MOVE_FAR);
     }
 }
@@ -221,9 +220,9 @@ static int janetc_sequal(JanetSlot lhs, JanetSlot rhs) {
 /* Move values from one slot to another. The destination must
  * be writeable (not a literal). */
 void janetc_copy(
-        JanetCompiler *c,
-        JanetSlot dest,
-        JanetSlot src) {
+    JanetCompiler *c,
+    JanetSlot dest,
+    JanetSlot src) {
     if (dest.flags & JANET_SLOT_CONSTANT) {
         janetc_cerror(c, "cannot write to constant");
         return;
@@ -240,11 +239,11 @@ void janetc_copy(
         return;
     }
     /* Process: src -> near -> dest */
-    int32_t near = janetc_allocnear(c, JANETC_REGTEMP_3);
-    janetc_movenear(c, near, src);
-    janetc_moveback(c, dest, near);
+    int32_t nearreg = janetc_allocnear(c, JANETC_REGTEMP_3);
+    janetc_movenear(c, nearreg, src);
+    janetc_moveback(c, dest, nearreg);
     /* Cleanup */
-    janetc_regalloc_freetemp(&c->scope->ra, near, JANETC_REGTEMP_3);
+    janetc_regalloc_freetemp(&c->scope->ra, nearreg, JANETC_REGTEMP_3);
 
 }
 /* Instruction templated emitters */
@@ -252,7 +251,7 @@ void janetc_copy(
 static int32_t emit1s(JanetCompiler *c, uint8_t op, JanetSlot s, int32_t rest, int wr) {
     int32_t reg = janetc_regnear(c, s, JANETC_REGTEMP_0);
     int32_t label = janet_v_count(c->buffer);
-    janetc_emit(c, op | (reg << 8) | (rest << 16));
+    janetc_emit(c, op | (reg << 8) | ((uint32_t)rest << 16));
     if (wr)
         janetc_moveback(c, s, reg);
     janetc_free_regnear(c, s, reg, JANETC_REGTEMP_0);
@@ -294,7 +293,7 @@ static int32_t emit2s(JanetCompiler *c, uint8_t op, JanetSlot s1, JanetSlot s2, 
     int32_t reg1 = janetc_regnear(c, s1, JANETC_REGTEMP_0);
     int32_t reg2 = janetc_regnear(c, s2, JANETC_REGTEMP_1);
     int32_t label = janet_v_count(c->buffer);
-    janetc_emit(c, op | (reg1 << 8) | (reg2 << 16) | (rest << 24));
+    janetc_emit(c, op | (reg1 << 8) | (reg2 << 16) | ((uint32_t)rest << 24));
     janetc_free_regnear(c, s2, reg2, JANETC_REGTEMP_1);
     if (wr)
         janetc_moveback(c, s1, reg1);
@@ -327,7 +326,7 @@ int32_t janetc_emit_sss(JanetCompiler *c, uint8_t op, JanetSlot s1, JanetSlot s2
     int32_t reg2 = janetc_regnear(c, s2, JANETC_REGTEMP_1);
     int32_t reg3 = janetc_regnear(c, s3, JANETC_REGTEMP_2);
     int32_t label = janet_v_count(c->buffer);
-    janetc_emit(c, op | (reg1 << 8) | (reg2 << 16) | (reg3 << 24));
+    janetc_emit(c, op | (reg1 << 8) | (reg2 << 16) | ((uint32_t)reg3 << 24));
     janetc_free_regnear(c, s2, reg2, JANETC_REGTEMP_1);
     janetc_free_regnear(c, s3, reg3, JANETC_REGTEMP_2);
     if (wr)

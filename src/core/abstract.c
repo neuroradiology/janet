@@ -21,16 +21,24 @@
 */
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
 #include "gc.h"
 #endif
 
 /* Create new userdata */
-void *janet_abstract(const JanetAbstractType *atype, size_t size) {
-    char *data = janet_gcalloc(JANET_MEMORY_ABSTRACT, sizeof(JanetAbstractHeader) + size);
-    JanetAbstractHeader *header = (JanetAbstractHeader *)data;
-    void *a = data + sizeof(JanetAbstractHeader);
+void *janet_abstract_begin(const JanetAbstractType *atype, size_t size) {
+    JanetAbstractHead *header = janet_gcalloc(JANET_MEMORY_NONE,
+                                sizeof(JanetAbstractHead) + size);
     header->size = size;
     header->type = atype;
-    return a;
+    return (void *) & (header->data);
+}
+
+void *janet_abstract_end(void *x) {
+    janet_gc_settype((void *)(janet_abstract_head(x)), JANET_MEMORY_ABSTRACT);
+    return x;
+}
+
+void *janet_abstract(const JanetAbstractType *atype, size_t size) {
+    return janet_abstract_end(janet_abstract_begin(atype, size));
 }

@@ -21,20 +21,38 @@
 */
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
 #include "gc.h"
 #include "util.h"
 #include <math.h>
 #endif
 
-/* Initialize a table */
-JanetTable *janet_table_init(JanetTable *table, int32_t capacity) {
+#define JANET_TABLE_FLAG_STACK 0x10000
+
+static void *janet_memalloc_empty_local(int32_t count) {
+    int32_t i;
+    void *mem = janet_smalloc(count * sizeof(JanetKV));
+    JanetKV *mmem = (JanetKV *)mem;
+    for (i = 0; i < count; i++) {
+        JanetKV *kv = mmem + i;
+        kv->key = janet_wrap_nil();
+        kv->value = janet_wrap_nil();
+    }
+    return mem;
+}
+
+static JanetTable *janet_table_init_impl(JanetTable *table, int32_t capacity, int stackalloc) {
     JanetKV *data;
     capacity = janet_tablen(capacity);
+    if (stackalloc) table->gc.flags = JANET_TABLE_FLAG_STACK;
     if (capacity) {
-        data = (JanetKV *) janet_memalloc_empty(capacity);
-        if (NULL == data) {
-            JANET_OUT_OF_MEMORY;
+        if (stackalloc) {
+            data = janet_memalloc_empty_local(capacity);
+        } else {
+            data = (JanetKV *) janet_memalloc_empty(capacity);
+            if (NULL == data) {
+                JANET_OUT_OF_MEMORY;
+            }
         }
         table->data = data;
         table->capacity = capacity;
@@ -48,15 +66,20 @@ JanetTable *janet_table_init(JanetTable *table, int32_t capacity) {
     return table;
 }
 
+/* Initialize a table */
+JanetTable *janet_table_init(JanetTable *table, int32_t capacity) {
+    return janet_table_init_impl(table, capacity, 1);
+}
+
 /* Deinitialize a table */
 void janet_table_deinit(JanetTable *table) {
-    free(table->data);
+    janet_sfree(table->data);
 }
 
 /* Create a new table */
 JanetTable *janet_table(int32_t capacity) {
     JanetTable *table = janet_gcalloc(JANET_MEMORY_TABLE, sizeof(JanetTable));
-    return janet_table_init(table, capacity);
+    return janet_table_init_impl(table, capacity, 0);
 }
 
 /* Find the bucket that contains the given key. Will also return
@@ -68,9 +91,15 @@ JanetKV *janet_table_find(JanetTable *t, Janet key) {
 /* Resize the dictionary table. */
 static void janet_table_rehash(JanetTable *t, int32_t size) {
     JanetKV *olddata = t->data;
-    JanetKV *newdata = (JanetKV *) janet_memalloc_empty(size);
-    if (NULL == newdata) {
-        JANET_OUT_OF_MEMORY;
+    JanetKV *newdata;
+    int islocal = t->gc.flags & JANET_TABLE_FLAG_STACK;
+    if (islocal) {
+        newdata = (JanetKV *) janet_memalloc_empty_local(size);
+    } else {
+        newdata = (JanetKV *) janet_memalloc_empty(size);
+        if (NULL == newdata) {
+            JANET_OUT_OF_MEMORY;
+        }
     }
     int32_t i, oldcapacity;
     oldcapacity = t->capacity;
@@ -84,7 +113,11 @@ static void janet_table_rehash(JanetTable *t, int32_t size) {
             *newkv = *kv;
         }
     }
-    free(olddata);
+    if (islocal) {
+        janet_sfree(olddata);
+    } else {
+        free(olddata);
+    }
 }
 
 /* Get a value out of the table */
@@ -99,6 +132,27 @@ Janet janet_table_get(JanetTable *t, Janet key) {
             bucket = janet_table_find(t, key);
             if (NULL != bucket && !janet_checktype(bucket->key, JANET_NIL))
                 return bucket->value;
+        }
+    }
+    return janet_wrap_nil();
+}
+
+/* Get a value out of the table, and record which prototype it was from. */
+Janet janet_table_get_ex(JanetTable *t, Janet key, JanetTable **which) {
+    JanetKV *bucket = janet_table_find(t, key);
+    if (NULL != bucket && !janet_checktype(bucket->key, JANET_NIL)) {
+        *which = t;
+        return bucket->value;
+    }
+    /* Check prototypes */
+    {
+        int i;
+        for (i = JANET_MAX_PROTO_DEPTH, t = t->proto; t && i; t = t->proto, --i) {
+            bucket = janet_table_find(t, key);
+            if (NULL != bucket && !janet_checktype(bucket->key, JANET_NIL)) {
+                *which = t;
+                return bucket->value;
+            }
         }
     }
     return janet_wrap_nil();
@@ -144,7 +198,7 @@ void janet_table_put(JanetTable *t, Janet key, Janet value) {
                 janet_table_rehash(t, janet_tablen(2 * t->count + 2));
             }
             bucket = janet_table_find(t, key);
-            if (janet_checktype(bucket->value, JANET_FALSE))
+            if (janet_checktype(bucket->value, JANET_BOOLEAN))
                 --t->deleted;
             bucket->key = key;
             bucket->value = value;
@@ -173,6 +227,21 @@ const JanetKV *janet_table_to_struct(JanetTable *t) {
         kv++;
     }
     return janet_struct_end(st);
+}
+
+/* Clone a table. */
+JanetTable *janet_table_clone(JanetTable *table) {
+    JanetTable *newTable = janet_gcalloc(JANET_MEMORY_TABLE, sizeof(JanetTable));
+    newTable->count = table->count;
+    newTable->capacity = table->capacity;
+    newTable->deleted = table->deleted;
+    newTable->proto = table->proto;
+    newTable->data = malloc(newTable->capacity * sizeof(JanetKV));
+    if (NULL == newTable->data) {
+        JANET_OUT_OF_MEMORY;
+    }
+    memcpy(newTable->data, table->data, table->capacity * sizeof(JanetKV));
+    return newTable;
 }
 
 /* Merge a table or struct into a table */
@@ -208,8 +277,8 @@ static Janet cfun_table_getproto(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
     JanetTable *t = janet_gettable(argv, 0);
     return t->proto
-        ? janet_wrap_table(t->proto)
-        : janet_wrap_nil();
+           ? janet_wrap_table(t->proto)
+           : janet_wrap_nil();
 }
 
 static Janet cfun_table_setproto(int32_t argc, Janet *argv) {
@@ -235,38 +304,50 @@ static Janet cfun_table_rawget(int32_t argc, Janet *argv) {
     return janet_table_rawget(table, argv[1]);
 }
 
+static Janet cfun_table_clone(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    JanetTable *table = janet_gettable(argv, 0);
+    return janet_wrap_table(janet_table_clone(table));
+}
+
 static const JanetReg table_cfuns[] = {
     {
         "table/new", cfun_table_new,
         JDOC("(table/new capacity)\n\n"
-                "Creates a new empty table with pre-allocated memory "
-                "for capacity entries. This means that if one knows the number of "
-                "entries going to go in a table on creation, extra memory allocation "
-                "can be avoided. Returns the new table.")
+             "Creates a new empty table with pre-allocated memory "
+             "for capacity entries. This means that if one knows the number of "
+             "entries going to go in a table on creation, extra memory allocation "
+             "can be avoided. Returns the new table.")
     },
     {
         "table/to-struct", cfun_table_tostruct,
         JDOC("(table/to-struct tab)\n\n"
-                "Convert a table to a struct. Returns a new struct. This function "
-                "does not take into account prototype tables.")
+             "Convert a table to a struct. Returns a new struct. This function "
+             "does not take into account prototype tables.")
     },
     {
         "table/getproto", cfun_table_getproto,
         JDOC("(table/getproto tab)\n\n"
-                "Get the prototype table of a table. Returns nil if a table "
-                "has no prototype, otherwise returns the prototype.")
+             "Get the prototype table of a table. Returns nil if a table "
+             "has no prototype, otherwise returns the prototype.")
     },
     {
         "table/setproto", cfun_table_setproto,
         JDOC("(table/setproto tab proto)\n\n"
-                "Set the prototype of a table. Returns the original table tab.")
+             "Set the prototype of a table. Returns the original table tab.")
     },
     {
         "table/rawget", cfun_table_rawget,
         JDOC("(table/rawget tab key)\n\n"
-                "Gets a value from a table without looking at the prototype table. "
-                "If a table tab does not contain t directly, the function will return "
-                "nil without checking the prototype. Returns the value in the table.")
+             "Gets a value from a table without looking at the prototype table. "
+             "If a table tab does not contain t directly, the function will return "
+             "nil without checking the prototype. Returns the value in the table.")
+    },
+    {
+        "table/clone", cfun_table_clone,
+        JDOC("(table/clone tab)\n\n"
+             "Create a copy of a table. Updates to the new table will not change the old table, "
+             "and vice versa.")
     },
     {NULL, NULL, NULL}
 };

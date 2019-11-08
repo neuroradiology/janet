@@ -26,42 +26,39 @@
  * This version has been modified for much greater flexibility in parsing, such
  * as choosing the radix and supporting scientific notation with any radix.
  *
- * Numbers are of the form [-+]R[rR]I.F[eE&][-+]X where R is the radix, I is
- * the integer part, F is the fractional part, and X is the exponent. All
- * signs, radix, decimal point, fractional part, and exponent can be omitted.
- * The number will be considered and integer if the there is no decimal point
- * and no exponent. Any number greater the 2^32-1 or less than -(2^32) will be
- * coerced to a double. If there is an error, the function janet_scan_number will
- * return a janet nil. The radix is assumed to be 10 if omitted, and the E
+ * Numbers are of the form [-+]R[rR]I.F[eE&][-+]X in pseudo-regex form, where R
+ * is the radix, I is the integer part, F is the fractional part, and X is the
+ * exponent. All signs, radix, decimal point, fractional part, and exponent can
+ * be omitted.  The radix is assumed to be 10 if omitted, and the E or e
  * separator for the exponent can only be used when the radix is 10. This is
- * because E is a valid digit in bases 15 or greater. For bases greater than 10,
- * the letters are used as digits. A through Z correspond to the digits 10
+ * because E is a valid digit in bases 15 or greater. For bases greater than
+ * 10, the letters are used as digits. A through Z correspond to the digits 10
  * through 35, and the lowercase letters have the same values. The radix number
  * is always in base 10. For example, a hexidecimal number could be written
  * '16rdeadbeef'. janet_scan_number also supports some c style syntax for
  * hexidecimal literals. The previous number could also be written
- * '0xdeadbeef'. Note that in this case, the number will actually be a double
- * as it will not fit in the range for a signed 32 bit integer. The string
- * '0xbeef' would parse to an integer as it is in the range of an int32_t. */
+ * '0xdeadbeef'.
+ */
 
 #include <math.h>
 #include <string.h>
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
+#include "util.h"
 #endif
 
 /* Lookup table for getting values of characters when parsing numbers. Handles
  * digits 0-9 and a-z (and A-Z). A-Z have values of 10 to 35. */
 static uint8_t digit_lookup[128] = {
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-    0,1,2,3,4,5,6,7,8,9,0xff,0xff,0xff,0xff,0xff,0xff,
-    0xff,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
-    25,26,27,28,29,30,31,32,33,34,35,0xff,0xff,0xff,0xff,0xff,
-    0xff,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
-    25,26,27,28,29,30,31,32,33,34,35,0xff,0xff,0xff,0xff,0xff
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 0xff, 0xff, 0xff, 0xff, 0xff
 };
 
 #define BIGNAT_NBIT 31
@@ -75,6 +72,7 @@ struct BigNat {
     uint32_t *digits; /* Each digit is base (2 ^ 31). Digits are least significant first. */
 };
 
+/* Initialize a bignat to 0 */
 static void bignat_zero(struct BigNat *x) {
     x->first_digit = 0;
     x->n = 0;
@@ -197,13 +195,13 @@ static double bignat_extract(struct BigNat *mant, int32_t exponent2) {
 }
 
 /* Read in a mantissa and exponent of a certain base, and give
- * back the double value. Should properly handle 0s, Infinities, and
+ * back the double value. Should properly handle 0s, infinities, and
  * denormalized numbers. (When the exponent values are too large) */
 static double convert(
-        int negative,
-        struct BigNat *mant,
-        int32_t base,
-        int32_t exponent) {
+    int negative,
+    struct BigNat *mant,
+    int32_t base,
+    int32_t exponent) {
 
     int32_t exponent2 = 0;
 
@@ -217,9 +215,9 @@ static double convert(
      * Get exponent to zero while holding X constant. */
 
     /* Positive exponents are simple */
-    for (;exponent > 3; exponent -= 4) bignat_muladd(mant, base * base * base * base, 0);
-    for (;exponent > 1; exponent -= 2) bignat_muladd(mant, base * base, 0);
-    for (;exponent > 0; exponent -= 1) bignat_muladd(mant, base, 0);
+    for (; exponent > 3; exponent -= 4) bignat_muladd(mant, base * base * base * base, 0);
+    for (; exponent > 1; exponent -= 2) bignat_muladd(mant, base * base, 0);
+    for (; exponent > 0; exponent -= 1) bignat_muladd(mant, base, 0);
 
     /* Negative exponents are tricky - we don't want to loose bits
      * from integer division, so we need to premultiply. */
@@ -227,22 +225,22 @@ static double convert(
         int32_t shamt = 5 - exponent / 4;
         bignat_lshift_n(mant, shamt);
         exponent2 -= shamt * BIGNAT_NBIT;
-        for (;exponent < -3; exponent += 4) bignat_div(mant, base * base * base * base);
-        for (;exponent < -1; exponent += 2) bignat_div(mant, base * base);
-        for (;exponent <  0; exponent += 1) bignat_div(mant, base);
+        for (; exponent < -3; exponent += 4) bignat_div(mant, base * base * base * base);
+        for (; exponent < -1; exponent += 2) bignat_div(mant, base * base);
+        for (; exponent <  0; exponent += 1) bignat_div(mant, base);
     }
 
     return negative
-        ? -bignat_extract(mant, exponent2)
-        : bignat_extract(mant, exponent2);
+           ? -bignat_extract(mant, exponent2)
+           : bignat_extract(mant, exponent2);
 }
 
 /* Scan a real (double) from a string. If the string cannot be converted into
  * and integer, set *err to 1 and return 0. */
 int janet_scan_number(
-        const uint8_t *str,
-        int32_t len,
-        double *out) {
+    const uint8_t *str,
+    int32_t len,
+    double *out) {
     const uint8_t *end = str + len;
     int seenadigit = 0;
     int ex = 0;
@@ -274,14 +272,14 @@ int janet_scan_number(
         base = 16;
         str += 2;
     } else if (str + 1 < end  &&
-            str[0] >= '0' && str[0] <= '9' &&
-            str[1] == 'r') {
+               str[0] >= '0' && str[0] <= '9' &&
+               str[1] == 'r') {
         base = str[0] - '0';
         str += 2;
     } else if (str + 2 < end  &&
-            str[0] >= '0' && str[0] <= '9' &&
-            str[1] >= '0' && str[1] <= '9' &&
-            str[2] == 'r') {
+               str[0] >= '0' && str[0] <= '9' &&
+               str[1] >= '0' && str[1] <= '9' &&
+               str[2] == 'r') {
         base = 10 * (str[0] - '0') + (str[1] - '0');
         if (base < 2 || base > 36) goto error;
         str += 3;
@@ -293,8 +291,9 @@ int janet_scan_number(
         if (*str == '.') {
             if (seenpoint) goto error;
             seenpoint = 1;
+        } else {
+            seenadigit = 1;
         }
-        seenadigit = 1;
         str++;
     }
 
@@ -349,7 +348,8 @@ int janet_scan_number(
             str++;
             seenadigit = 1;
         }
-        if (eneg) ex -= ee; else ex += ee;
+        if (eneg) ex -= ee;
+        else ex += ee;
     }
 
     if (!seenadigit)
@@ -359,7 +359,104 @@ int janet_scan_number(
     free(mant.digits);
     return 0;
 
-    error:
+error:
     free(mant.digits);
     return 1;
 }
+
+#ifdef JANET_INT_TYPES
+
+static int scan_uint64(
+    const uint8_t *str,
+    int32_t len,
+    uint64_t *out,
+    int *neg) {
+    const uint8_t *end = str + len;
+    int seenadigit = 0;
+    int base = 10;
+    *neg = 0;
+    *out = 0;
+    uint64_t accum = 0;
+    /* len max is INT64_MAX in base 2 with _ between each bits */
+    /* '2r' + 64 bits + 63 _  + sign = 130 => 150 for some leading  */
+    /* zeros */
+    if (len > 150) return 0;
+    /* Get sign */
+    if (str >= end) return 0;
+    if (*str == '-') {
+        *neg = 1;
+        str++;
+    } else if (*str == '+') {
+        str++;
+    }
+    /* Check for leading 0x or digit digit r */
+    if (str + 1 < end && str[0] == '0' && str[1] == 'x') {
+        base = 16;
+        str += 2;
+    } else if (str + 1 < end  &&
+               str[0] >= '0' && str[0] <= '9' &&
+               str[1] == 'r') {
+        base = str[0] - '0';
+        str += 2;
+    } else if (str + 2 < end  &&
+               str[0] >= '0' && str[0] <= '9' &&
+               str[1] >= '0' && str[1] <= '9' &&
+               str[2] == 'r') {
+        base = 10 * (str[0] - '0') + (str[1] - '0');
+        if (base < 2 || base > 36) return 0;
+        str += 3;
+    }
+
+    /* Skip leading zeros */
+    while (str < end && *str == '0') {
+        seenadigit = 1;
+        str++;
+    }
+    /* Parse significant digits */
+    while (str < end) {
+        if (*str == '_') {
+            if (!seenadigit) return 0;
+        } else {
+            int digit = digit_lookup[*str & 0x7F];
+            if (*str > 127 || digit >= base) return 0;
+            if (accum > (UINT64_MAX - digit) / base) return 0;
+            accum = accum * base + digit;
+            seenadigit = 1;
+        }
+        str++;
+    }
+
+    if (!seenadigit) return 0;
+    *out = accum;
+    return 1;
+}
+
+int janet_scan_int64(const uint8_t *str, int32_t len, int64_t *out) {
+    int neg;
+    uint64_t bi;
+    if (scan_uint64(str, len, &bi, &neg)) {
+        if (neg && bi <= 0x8000000000000000ULL) {
+            *out = -((int64_t) bi);
+            return 1;
+        }
+        if (!neg && bi <= 0x7FFFFFFFFFFFFFFFULL) {
+            *out = bi;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int janet_scan_uint64(const uint8_t *str, int32_t len, uint64_t *out) {
+    int neg;
+    uint64_t bi;
+    if (scan_uint64(str, len, &bi, &neg)) {
+        if (!neg) {
+            *out = bi;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+#endif

@@ -18,7 +18,7 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-(import test/helper :prefix "" :exit true)
+(import ./helper :prefix "" :exit true)
 (start-suite 0)
 
 (assert (= 10 (+ 1 2 3 4)) "addition")
@@ -299,6 +299,20 @@
 (assert (= (length (table 2 1 3 nil)) 1) "nil value table ctor")
 (assert (= (length {1 2 3 nil}) 1) "nil value struct literal")
 (assert (= (length @{1 2 3 nil}) 1) "nil value table literal")
+
+# Regression Test
+(assert (= 1 (((compile '(fn [] 1) @{})))) "regression test")
+
+# Regression Test #137
+(def [a b c] (range 10))
+(assert (= a 0) "regression #137 (1)")
+(assert (= b 1) "regression #137 (2)")
+(assert (= c 2) "regression #137 (3)")
+
+(var [x y z] (range 10))
+(assert (= x 0) "regression #137 (4)")
+(assert (= y 1) "regression #137 (5)")
+(assert (= z 2) "regression #137 (6)")
 
 (end-suite)
 

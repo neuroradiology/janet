@@ -18,7 +18,7 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-(import test/helper :prefix "" :exit true)
+(import ./helper :prefix "" :exit true)
 (start-suite 3)
 
 (assert (= (length (range 10)) 10) "(range 10)")
@@ -78,11 +78,15 @@
 
 # Another regression test - no segfaults
 (defn afn [x] x)
-(assert (= 1 (try (afn) ([err] 1))) "bad arity 1")
+(var afn-var afn)
+(var identity-var identity)
+(var map-var map)
+(var not-var not)
+(assert (= 1 (try (afn-var) ([err] 1))) "bad arity 1")
 (assert (= 4 (try ((fn [x y] (+ x y)) 1) ([_] 4))) "bad arity 2")
-(assert (= 1 (try (identity) ([err] 1))) "bad arity 3")
-(assert (= 1 (try (map) ([err] 1))) "bad arity 4")
-(assert (= 1 (try (not) ([err] 1))) "bad arity 5")
+(assert (= 1 (try (identity-var) ([err] 1))) "bad arity 3")
+(assert (= 1 (try (map-var) ([err] 1))) "bad arity 4")
+(assert (= 1 (try (not-var) ([err] 1))) "bad arity 5")
 
 # Assembly test
 # Fibonacci sequence, implemented with naive recursion.
@@ -113,9 +117,9 @@
 
 (assert (= 1 ({:ok 1} :ok)) "calling struct")
 (assert (= 2 (@{:ok 2} :ok)) "calling table")
-(assert (= :bad (try (@{:ok 2} :ok :no) ([err] :bad))) "calling table too many arguments")
-(assert (= :bad (try (:ok @{:ok 2} :no) ([err] :bad))) "calling keyword too many arguments")
-(assert (= :oops (try (1 1) ([err] :oops))) "calling number fails")
+(assert (= :bad (try ((identity @{:ok 2}) :ok :no) ([err] :bad))) "calling table too many arguments")
+(assert (= :bad (try ((identity :ok) @{:ok 2} :no) ([err] :bad))) "calling keyword too many arguments")
+(assert (= :oops (try ((+ 2 -1) 1) ([err] :oops))) "calling number fails")
 
 # Method test
 
@@ -159,6 +163,14 @@
 (buffer/blit b2 "abcdefg" 5 6)
 (assert (= (string b2) "joytogjoyto") "buffer/blit 3")
 
+# Buffer self blitting, check for use after free
+(def buf1 @"1234567890")
+(buffer/blit buf1 buf1 -1)
+(buffer/blit buf1 buf1 -1)
+(buffer/blit buf1 buf1 -1)
+(buffer/blit buf1 buf1 -1)
+(assert (= (string buf1) (string/repeat "1234567890" 16)) "buffer blit against self")
+
 # Buffer push word
 
 (def b3 @"")
@@ -169,6 +181,22 @@
 (buffer/push-word b3 0xFFFFFFFF 0x1100)
 (assert (= 8 (length b3)) "buffer/push-word 3")
 (assert (= "\xFF\xFF\xFF\xFF\0\x11\0\0" (string b3)) "buffer/push-word 4")
+
+# Buffer push string
+
+(def b4 (buffer/new-filled 10 0))
+(buffer/push-string b4 b4)
+(assert (= "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" (string b4)) "buffer/push-buffer 1")
+(def b5 @"123")
+(buffer/push-string b5 "456" @"789")
+(assert (= "123456789" (string b5)) "buffer/push-buffer 2")
+
+# Check for bugs with printing self with buffer/format
+
+(def buftemp @"abcd")
+(assert (= (string (buffer/format buftemp "---%p---" buftemp)) `abcd---@"abcd"---`) "buffer/format on self 1")
+(def buftemp @"abcd")
+(assert (= (string (buffer/format buftemp "---%p %p---" buftemp buftemp)) `abcd---@"abcd" @"abcd"---`) "buffer/format on self 2")
 
 # Peg
 
@@ -332,6 +360,38 @@
 (check-match janet-longstring "``` `` ```" true)
 (check-match janet-longstring "``  ```" false)
 
+# Backmatch
+
+(def backmatcher-1 '(* (capture (any "x") :1) "y" (backmatch :1) -1))
+
+(check-match backmatcher-1 "y" true)
+(check-match backmatcher-1 "xyx" true)
+(check-match backmatcher-1 "xxxxxxxyxxxxxxx" true)
+(check-match backmatcher-1 "xyxx" false)
+(check-match backmatcher-1 "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy" false)
+(check-match backmatcher-1 (string (string/repeat "x" 10000) "y") false)
+(check-match backmatcher-1 (string (string/repeat "x" 10000) "y" (string/repeat "x" 10000)) true)
+
+(def backmatcher-2 '(* '(any "x") "y" (backmatch) -1))
+
+(check-match backmatcher-2 "y" true)
+(check-match backmatcher-2 "xyx" true)
+(check-match backmatcher-2 "xxxxxxxyxxxxxxx" true)
+(check-match backmatcher-2 "xyxx" false)
+(check-match backmatcher-2 "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy" false)
+(check-match backmatcher-2 (string (string/repeat "x" 10000) "y") false)
+(check-match backmatcher-2 (string (string/repeat "x" 10000) "y" (string/repeat "x" 10000)) true)
+
+(def longstring-2 '(* '(some "`") (some (if-not (backmatch) 1)) (backmatch) -1))
+
+(check-match longstring-2 "`john" false)
+(check-match longstring-2 "abc" false)
+(check-match longstring-2 "` `" true)
+(check-match longstring-2 "`  `" true)
+(check-match longstring-2 "``  ``" true)
+(check-match longstring-2 "``` `` ```" true)
+(check-match longstring-2 "``  ```" false)
+
 # Optional
 
 (check-match '(* (opt "hi") -1) "" true)
@@ -351,6 +411,12 @@
 (def t (put @{} :hi 1))
 (assert (deep= t @{:hi 1}) "regression #24")
 
+# Peg swallowing errors
+(assert (try (peg/match ~(/ '1 ,(fn [x] (nil x))) "x") ([err] err))
+        "errors should not be swallowed")
+(assert (try ((fn [x] (nil x))) ([err] err))
+        "errors should not be swallowed 2")
+
 # Tuple types
 
 (assert (= (tuple/type '(1 2 3)) :parens) "normal tuple")
@@ -358,5 +424,23 @@
 (assert (= (tuple/type '[1 2 3]) :brackets) "bracketed tuple 2")
 (assert (= (tuple/type (-> '(1 2 3) marshal unmarshal)) :parens) "normal tuple marshalled/unmarshalled")
 (assert (= (tuple/type (-> '[1 2 3] marshal unmarshal)) :brackets) "normal tuple marshalled/unmarshalled")
+
+# Check for bad memoization (+ :a) should mean different things in different contexts.
+(def redef-a
+  ~{:a "abc"
+    :c (+ :a)
+    :main (* :c {:a "def" :main (+ :a)} -1)})
+
+(check-match redef-a "abcdef" true)
+(check-match redef-a "abcabc" false)
+(check-match redef-a "defdef" false)
+
+(def redef-b
+  ~{:pork {:pork "beef" :main (+ -1 (* 1 :pork))}
+    :main :pork})
+
+(check-match redef-b "abeef" true)
+(check-match redef-b "aabeef" false)
+(check-match redef-b "aaaaaa" false)
 
 (end-suite)

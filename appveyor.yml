@@ -1,7 +1,7 @@
 version: build-{build}
 clone_folder: c:\projects\janet
 image:
-- Visual Studio 2017
+- Visual Studio 2019
 configuration:
 - Release
 - Debug
@@ -15,34 +15,49 @@ matrix:
 
 # skip unsupported combinations
 init:
-- call "C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Auxiliary\Build\vcvars64.bat"
+    - call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars32.bat"
 
 install:
-    - build_win
-    - build_win test
+    - set JANET_BUILD=%appveyor_repo_commit:~0,7%
     - choco install nsis -y -pre
-    - call "C:\Program Files (x86)\NSIS\makensis.exe" janet-installer.nsi 
-    - build_win dist
-    - copy janet-install.exe dist\install.exe 
-    
+    # Replace makensis.exe and files with special long string build. This should
+    # prevent issues when setting PATH during installation.
+    - 7z e "tools\nsis-3.04-strlen_8192.zip" -o"C:\Program Files (x86)\NSIS\" -y
+    - build_win all
+    - refreshenv
+    # We need to reload vcvars after refreshing
+    - call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars32.bat"
+    - build_win test-install
+    - set janet_outname=%appveyor_repo_tag_name%
+    - if "%janet_outname%"=="" set janet_outname=v1.4.0
 build: off
 
-only_commits:
-  files:
-    - appveyor.yml
-    - src/
-
 artifacts:
-    - path: dist
-      name: janet-windows
+    - name: janet.c
+      path: dist\janet.c
+      type: File
+    - name: janet.h
+      path: dist\janet.h
+      type: File
+    - name: janetconf.h
+      path: dist\janetconf.h
+      type: File
+    - name: shell.c
+      path: dist\shell.c
+      type: File
+    - name: "janet-$(janet_outname)-windows"
+      path: dist
       type: Zip
+    - path: "janet-$(janet_outname)-windows-installer.exe"
+      name: "janet-$(janet_outname)-windows-installer.exe"
+      type: File
 
 deploy:
   description: 'The Janet Programming Language.'
   provider: GitHub
   auth_token:
     secure: lwEXy09qhj2jSH9s1C/KvCkAUqJSma8phFR+0kbsfUc3rVxpNK5uD3z9Md0SjYRx
-  artifact: janet-windows
+  artifact: /janet.*/
   draft: true
   on:
       APPVEYOR_REPO_TAG: true

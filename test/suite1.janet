@@ -18,7 +18,7 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-(import test/helper :prefix "" :exit true)
+(import ./helper :prefix "" :exit true)
 (start-suite 1)
 
 (assert (= 400 (math/sqrt 160000)) "sqrt(160000)=400")
@@ -97,8 +97,8 @@
 # of the triangle to the leaves of the triangle.
 
 (defn myfold [xs ys]
-  (let [xs1 (tuple/prepend xs 0)
-        xs2 (tuple/append xs 0)
+  (let [xs1 [;xs 0]
+        xs2 [0 ;xs]
         m1 (map + xs1 ys)
         m2 (map + xs2 ys)]
     (map max m1 m2)))
@@ -140,7 +140,7 @@
 
 # Marshal
 
-(def um-lookup (env-lookup *env*))
+(def um-lookup (env-lookup (fiber/getenv (fiber/current))))
 (def m-lookup (invert um-lookup))
 
 (defn testmarsh [x msg]
@@ -175,10 +175,14 @@
 (testmarsh (fiber/new (fn [] (yield 1) 2)) "marshal simple fiber 1")
 (testmarsh (fiber/new (fn [&] (yield 1) 2)) "marshal simple fiber 2")
 
+(def strct {:a @[nil]})
+(put (strct :a) 0 strct)
+(testmarsh strct "cyclic struct")
+
 # Large functions
 (def manydefs (seq [i :range [0 300]] (tuple 'def (gensym) (string "value_" i))))
 (array/push manydefs (tuple * 10000 3 5 7 9))
-(def f (compile (tuple/prepend manydefs 'do) *env*))
+(def f (compile ['do ;manydefs] (fiber/getenv (fiber/current))))
 (assert (= (f) (* 10000 3 5 7 9)) "long function compilation")
 
 # Some higher order functions and macros
@@ -211,6 +215,9 @@
 # Testing the loop and for macros
 (def xs (apply tuple (seq [x :range [0 10] :when (even? x)] (tuple (/ x 2) x))))
 (assert (= xs '((0 0) (1 2) (2 4) (3 6) (4 8))) "seq macro 1")
+
+(def xs (apply tuple (seq [x :down [8 -2] :when (even? x)] (tuple (/ x 2) x))))
+(assert (= xs '((4 8) (3 6) (2 4) (1 2) (0 0))) "seq macro 2")
 
 # Some testing for not=
 (assert (not= 1 1 0) "not= 1")

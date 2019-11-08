@@ -21,7 +21,7 @@
 */
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
 #endif
 
 /*
@@ -35,27 +35,28 @@ int janet_equals(Janet x, Janet y) {
         result = 0;
     } else {
         switch (janet_type(x)) {
-        case JANET_NIL:
-        case JANET_TRUE:
-        case JANET_FALSE:
-            result = 1;
-            break;
-        case JANET_NUMBER:
-            result = (janet_unwrap_number(x) == janet_unwrap_number(y));
-            break;
-        case JANET_STRING:
-            result = janet_string_equal(janet_unwrap_string(x), janet_unwrap_string(y));
-            break;
-        case JANET_TUPLE:
-            result = janet_tuple_equal(janet_unwrap_tuple(x), janet_unwrap_tuple(y));
-            break;
-        case JANET_STRUCT:
-            result = janet_struct_equal(janet_unwrap_struct(x), janet_unwrap_struct(y));
-            break;
-        default:
-            /* compare pointers */
-            result = (janet_unwrap_pointer(x) == janet_unwrap_pointer(y));
-            break;
+            case JANET_NIL:
+                result = 1;
+                break;
+            case JANET_BOOLEAN:
+                result = (janet_unwrap_boolean(x) == janet_unwrap_boolean(y));
+                break;
+            case JANET_NUMBER:
+                result = (janet_unwrap_number(x) == janet_unwrap_number(y));
+                break;
+            case JANET_STRING:
+                result = janet_string_equal(janet_unwrap_string(x), janet_unwrap_string(y));
+                break;
+            case JANET_TUPLE:
+                result = janet_tuple_equal(janet_unwrap_tuple(x), janet_unwrap_tuple(y));
+                break;
+            case JANET_STRUCT:
+                result = janet_struct_equal(janet_unwrap_struct(x), janet_unwrap_struct(y));
+                break;
+            default:
+                /* compare pointers */
+                result = (janet_unwrap_pointer(x) == janet_unwrap_pointer(y));
+                break;
         }
     }
     return result;
@@ -65,41 +66,38 @@ int janet_equals(Janet x, Janet y) {
 int32_t janet_hash(Janet x) {
     int32_t hash = 0;
     switch (janet_type(x)) {
-    case JANET_NIL:
-        hash = 0;
-        break;
-    case JANET_FALSE:
-        hash = 1;
-        break;
-    case JANET_TRUE:
-        hash = 2;
-        break;
-    case JANET_STRING:
-    case JANET_SYMBOL:
-    case JANET_KEYWORD:
-        hash = janet_string_hash(janet_unwrap_string(x));
-        break;
-    case JANET_TUPLE:
-        hash = janet_tuple_hash(janet_unwrap_tuple(x));
-        break;
-    case JANET_STRUCT:
-        hash = janet_struct_hash(janet_unwrap_struct(x));
-        break;
-    default:
-        /* TODO - test performance with different hash functions */
-        if (sizeof(double) == sizeof(void *)) {
-            /* Assuming 8 byte pointer */
-            uint64_t i = janet_u64(x);
-            hash = (int32_t)(i & 0xFFFFFFFF);
-            /* Get a bit more entropy by shifting the low bits out */
-            hash >>= 3;
-            hash ^= (int32_t) (i >> 32);
-        } else {
-            /* Assuming 4 byte pointer (or smaller) */
-            hash = (int32_t) ((char *)janet_unwrap_pointer(x) - (char *)0);
-            hash >>= 2;
-        }
-        break;
+        case JANET_NIL:
+            hash = 0;
+            break;
+        case JANET_BOOLEAN:
+            hash = janet_unwrap_boolean(x);
+            break;
+        case JANET_STRING:
+        case JANET_SYMBOL:
+        case JANET_KEYWORD:
+            hash = janet_string_hash(janet_unwrap_string(x));
+            break;
+        case JANET_TUPLE:
+            hash = janet_tuple_hash(janet_unwrap_tuple(x));
+            break;
+        case JANET_STRUCT:
+            hash = janet_struct_hash(janet_unwrap_struct(x));
+            break;
+        default:
+            /* TODO - test performance with different hash functions */
+            if (sizeof(double) == sizeof(void *)) {
+                /* Assuming 8 byte pointer */
+                uint64_t i = janet_u64(x);
+                hash = (int32_t)(i & 0xFFFFFFFF);
+                /* Get a bit more entropy by shifting the low bits out */
+                hash >>= 3;
+                hash ^= (int32_t)(i >> 32);
+            } else {
+                /* Assuming 4 byte pointer (or smaller) */
+                hash = (int32_t)((char *)janet_unwrap_pointer(x) - (char *)0);
+                hash >>= 2;
+            }
+            break;
     }
     return hash;
 }
@@ -111,15 +109,15 @@ int janet_compare(Janet x, Janet y) {
     if (janet_type(x) == janet_type(y)) {
         switch (janet_type(x)) {
             case JANET_NIL:
-            case JANET_FALSE:
-            case JANET_TRUE:
                 return 0;
+            case JANET_BOOLEAN:
+                return janet_unwrap_boolean(x) - janet_unwrap_boolean(y);
             case JANET_NUMBER:
                 /* Check for NaNs to ensure total order */
                 if (janet_unwrap_number(x) != janet_unwrap_number(x))
                     return janet_unwrap_number(y) != janet_unwrap_number(y)
-                        ? 0
-                        : -1;
+                           ? 0
+                           : -1;
                 if (janet_unwrap_number(y) != janet_unwrap_number(y))
                     return 1;
 
@@ -153,7 +151,6 @@ Janet janet_get(Janet ds, Janet key) {
     switch (janet_type(ds)) {
         default:
             janet_panicf("expected %T, got %v", JANET_TFLAG_LENGTHABLE, ds);
-            value = janet_wrap_nil();
             break;
         case JANET_STRUCT:
             value = janet_struct_get(janet_unwrap_struct(ds), key);
@@ -161,75 +158,69 @@ Janet janet_get(Janet ds, Janet key) {
         case JANET_TABLE:
             value = janet_table_get(janet_unwrap_table(ds), key);
             break;
-        case JANET_ARRAY:
-            {
-                JanetArray *array = janet_unwrap_array(ds);
-                int32_t index;
-                if (!janet_checkint(key))
-                    janet_panic("expected integer key");
-                index = janet_unwrap_integer(key);
-                if (index < 0 || index >= array->count) {
-                    value = janet_wrap_nil();
-                } else {
-                    value = array->data[index];
-                }
-                break;
+        case JANET_ARRAY: {
+            JanetArray *array = janet_unwrap_array(ds);
+            int32_t index;
+            if (!janet_checkint(key))
+                janet_panic("expected integer key");
+            index = janet_unwrap_integer(key);
+            if (index < 0 || index >= array->count) {
+                value = janet_wrap_nil();
+            } else {
+                value = array->data[index];
             }
-        case JANET_TUPLE:
-            {
-                const Janet *tuple = janet_unwrap_tuple(ds);
-                int32_t index;
-                if (!janet_checkint(key))
-                    janet_panic("expected integer key");
-                index = janet_unwrap_integer(key);
-                if (index < 0 || index >= janet_tuple_length(tuple)) {
-                    value = janet_wrap_nil();
-                } else {
-                    value = tuple[index];
-                }
-                break;
+            break;
+        }
+        case JANET_TUPLE: {
+            const Janet *tuple = janet_unwrap_tuple(ds);
+            int32_t index;
+            if (!janet_checkint(key))
+                janet_panic("expected integer key");
+            index = janet_unwrap_integer(key);
+            if (index < 0 || index >= janet_tuple_length(tuple)) {
+                value = janet_wrap_nil();
+            } else {
+                value = tuple[index];
             }
-        case JANET_BUFFER:
-            {
-                JanetBuffer *buffer = janet_unwrap_buffer(ds);
-                int32_t index;
-                if (!janet_checkint(key))
-                    janet_panic("expected integer key");
-                index = janet_unwrap_integer(key);
-                if (index < 0 || index >= buffer->count) {
-                    value = janet_wrap_nil();
-                } else {
-                    value = janet_wrap_integer(buffer->data[index]);
-                }
-                break;
+            break;
+        }
+        case JANET_BUFFER: {
+            JanetBuffer *buffer = janet_unwrap_buffer(ds);
+            int32_t index;
+            if (!janet_checkint(key))
+                janet_panic("expected integer key");
+            index = janet_unwrap_integer(key);
+            if (index < 0 || index >= buffer->count) {
+                value = janet_wrap_nil();
+            } else {
+                value = janet_wrap_integer(buffer->data[index]);
             }
+            break;
+        }
         case JANET_STRING:
         case JANET_SYMBOL:
-        case JANET_KEYWORD:
-            {
-                const uint8_t *str = janet_unwrap_string(ds);
-                int32_t index;
-                if (!janet_checkint(key))
-                    janet_panic("expected integer key");
-                index = janet_unwrap_integer(key);
-                if (index < 0 || index >= janet_string_length(str)) {
-                    value = janet_wrap_nil();
-                } else {
-                    value = janet_wrap_integer(str[index]);
-                }
-                break;
+        case JANET_KEYWORD: {
+            const uint8_t *str = janet_unwrap_string(ds);
+            int32_t index;
+            if (!janet_checkint(key))
+                janet_panic("expected integer key");
+            index = janet_unwrap_integer(key);
+            if (index < 0 || index >= janet_string_length(str)) {
+                value = janet_wrap_nil();
+            } else {
+                value = janet_wrap_integer(str[index]);
             }
-    case JANET_ABSTRACT:
-      {
-	JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
-	if (type->get) {
-	  value = (type->get)(janet_unwrap_abstract(ds),key);
-	} else {
-	  janet_panicf("no getter for %T ", JANET_TFLAG_LENGTHABLE, ds);
-	  value = janet_wrap_nil();
-	}
-	break;
-      }
+            break;
+        }
+        case JANET_ABSTRACT: {
+            JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
+            if (type->get) {
+                value = (type->get)(janet_unwrap_abstract(ds), key);
+            } else {
+                janet_panicf("no getter for %v ", ds);
+            }
+            break;
+        }
     }
     return value;
 }
@@ -240,7 +231,6 @@ Janet janet_getindex(Janet ds, int32_t index) {
     switch (janet_type(ds)) {
         default:
             janet_panicf("expected %T, got %v", JANET_TFLAG_LENGTHABLE, ds);
-            value = janet_wrap_nil();
             break;
         case JANET_STRING:
         case JANET_SYMBOL:
@@ -278,17 +268,15 @@ Janet janet_getindex(Janet ds, int32_t index) {
         case JANET_STRUCT:
             value = janet_struct_get(janet_unwrap_struct(ds), janet_wrap_integer(index));
             break;
-    case JANET_ABSTRACT:
-      {
-	JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
-	if (type->get) {
-	  value = (type->get)(janet_unwrap_abstract(ds),janet_wrap_integer(index));
-	} else {
-	  janet_panicf("no getter for %T ", JANET_TFLAG_LENGTHABLE, ds);
-	  value = janet_wrap_nil();
-	}
-	break;
-      }
+        case JANET_ABSTRACT: {
+            JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
+            if (type->get) {
+                value = (type->get)(janet_unwrap_abstract(ds), janet_wrap_integer(index));
+            } else {
+                janet_panicf("no getter for %v ", ds);
+            }
+            break;
+        }
     }
     return value;
 }
@@ -297,7 +285,6 @@ int32_t janet_length(Janet x) {
     switch (janet_type(x)) {
         default:
             janet_panicf("expected %T, got %v", JANET_TFLAG_LENGTHABLE, x);
-            return 0;
         case JANET_STRING:
         case JANET_SYMBOL:
         case JANET_KEYWORD:
@@ -312,6 +299,38 @@ int32_t janet_length(Janet x) {
             return janet_struct_length(janet_unwrap_struct(x));
         case JANET_TABLE:
             return janet_unwrap_table(x)->count;
+        case JANET_ABSTRACT: {
+            Janet argv[1] = { x };
+            Janet len = janet_mcall("length", 1, argv);
+            if (!janet_checkint(len))
+                janet_panicf("invalid integer length %v", len);
+            return janet_unwrap_integer(len);
+        }
+    }
+}
+
+Janet janet_lengthv(Janet x) {
+    switch (janet_type(x)) {
+        default:
+            janet_panicf("expected %T, got %v", JANET_TFLAG_LENGTHABLE, x);
+        case JANET_STRING:
+        case JANET_SYMBOL:
+        case JANET_KEYWORD:
+            return janet_wrap_integer(janet_string_length(janet_unwrap_string(x)));
+        case JANET_ARRAY:
+            return janet_wrap_integer(janet_unwrap_array(x)->count);
+        case JANET_BUFFER:
+            return janet_wrap_integer(janet_unwrap_buffer(x)->count);
+        case JANET_TUPLE:
+            return janet_wrap_integer(janet_tuple_length(janet_unwrap_tuple(x)));
+        case JANET_STRUCT:
+            return janet_wrap_integer(janet_struct_length(janet_unwrap_struct(x)));
+        case JANET_TABLE:
+            return janet_wrap_integer(janet_unwrap_table(x)->count);
+        case JANET_ABSTRACT: {
+            Janet argv[1] = { x };
+            return janet_mcall("length", 1, argv);
+        }
     }
 }
 
@@ -319,46 +338,41 @@ void janet_putindex(Janet ds, int32_t index, Janet value) {
     switch (janet_type(ds)) {
         default:
             janet_panicf("expected %T, got %v",
-                    JANET_TFLAG_ARRAY | JANET_TFLAG_BUFFER | JANET_TFLAG_TABLE, ds);
+                         JANET_TFLAG_ARRAY | JANET_TFLAG_BUFFER | JANET_TFLAG_TABLE, ds);
+        case JANET_ARRAY: {
+            JanetArray *array = janet_unwrap_array(ds);
+            if (index >= array->count) {
+                janet_array_ensure(array, index + 1, 2);
+                array->count = index + 1;
+            }
+            array->data[index] = value;
             break;
-        case JANET_ARRAY:
-            {
-                JanetArray *array = janet_unwrap_array(ds);
-                if (index >= array->count) {
-                    janet_array_ensure(array, index + 1, 2);
-                    array->count = index + 1;
-                }
-                array->data[index] = value;
-                break;
+        }
+        case JANET_BUFFER: {
+            JanetBuffer *buffer = janet_unwrap_buffer(ds);
+            if (!janet_checkint(value))
+                janet_panicf("can only put integers in buffers, got %v", value);
+            if (index >= buffer->count) {
+                janet_buffer_ensure(buffer, index + 1, 2);
+                buffer->count = index + 1;
             }
-        case JANET_BUFFER:
-            {
-                JanetBuffer *buffer = janet_unwrap_buffer(ds);
-                if (!janet_checkint(value))
-                    janet_panicf("can only put integers in buffers, got %v", value);
-                if (index >= buffer->count) {
-                    janet_buffer_ensure(buffer, index + 1, 2);
-                    buffer->count = index + 1;
-                }
-                buffer->data[index] = janet_unwrap_integer(value);
-                break;
+            buffer->data[index] = janet_unwrap_integer(value);
+            break;
+        }
+        case JANET_TABLE: {
+            JanetTable *table = janet_unwrap_table(ds);
+            janet_table_put(table, janet_wrap_integer(index), value);
+            break;
+        }
+        case JANET_ABSTRACT: {
+            JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
+            if (type->put) {
+                (type->put)(janet_unwrap_abstract(ds), janet_wrap_integer(index), value);
+            } else {
+                janet_panicf("no setter for %v ", ds);
             }
-        case JANET_TABLE:
-            {
-                JanetTable *table = janet_unwrap_table(ds);
-                janet_table_put(table, janet_wrap_integer(index), value);
-                break;
-            }
-        case JANET_ABSTRACT:
-	  {
-	    JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
-	    if (type->put) {
-	      (type->put)(janet_unwrap_abstract(ds),janet_wrap_integer(index),value);
-	    } else {
-	      janet_panicf("no setter for %T ", JANET_TFLAG_LENGTHABLE, ds);
-	    }
-	    break;
-	  }
+            break;
+        }
     }
 }
 
@@ -366,49 +380,44 @@ void janet_put(Janet ds, Janet key, Janet value) {
     switch (janet_type(ds)) {
         default:
             janet_panicf("expected %T, got %v",
-                    JANET_TFLAG_ARRAY | JANET_TFLAG_BUFFER | JANET_TFLAG_TABLE, ds);
+                         JANET_TFLAG_ARRAY | JANET_TFLAG_BUFFER | JANET_TFLAG_TABLE, ds);
+        case JANET_ARRAY: {
+            int32_t index;
+            JanetArray *array = janet_unwrap_array(ds);
+            if (!janet_checkint(key)) janet_panicf("expected integer key, got %v", key);
+            index = janet_unwrap_integer(key);
+            if (index < 0 || index == INT32_MAX) janet_panicf("bad integer key, got %v", key);
+            if (index >= array->count) {
+                janet_array_setcount(array, index + 1);
+            }
+            array->data[index] = value;
             break;
-        case JANET_ARRAY:
-            {
-                int32_t index;
-                JanetArray *array = janet_unwrap_array(ds);
-                if (!janet_checkint(key)) janet_panicf("expected integer key, got %v", key);
-                index = janet_unwrap_integer(key);
-                if (index < 0 || index == INT32_MAX) janet_panicf("bad integer key, got %v", key);
-                if (index >= array->count) {
-                    janet_array_setcount(array, index + 1);
-                }
-                array->data[index] = value;
-                break;
+        }
+        case JANET_BUFFER: {
+            int32_t index;
+            JanetBuffer *buffer = janet_unwrap_buffer(ds);
+            if (!janet_checkint(key)) janet_panicf("expected integer key, got %v", key);
+            index = janet_unwrap_integer(key);
+            if (index < 0 || index == INT32_MAX) janet_panicf("bad integer key, got %v", key);
+            if (!janet_checkint(value))
+                janet_panicf("can only put integers in buffers, got %v", value);
+            if (index >= buffer->count) {
+                janet_buffer_setcount(buffer, index + 1);
             }
-        case JANET_BUFFER:
-            {
-                int32_t index;
-                JanetBuffer *buffer = janet_unwrap_buffer(ds);
-                if (!janet_checkint(key)) janet_panicf("expected integer key, got %v", key);
-                index = janet_unwrap_integer(key);
-                if (index < 0 || index == INT32_MAX) janet_panicf("bad integer key, got %v", key);
-                if (!janet_checkint(value))
-                    janet_panicf("can only put integers in buffers, got %v", value);
-                if (index >= buffer->count) {
-                    janet_buffer_setcount(buffer, index + 1);
-                }
-                buffer->data[index] = (uint8_t) (janet_unwrap_integer(value) & 0xFF);
-                break;
-            }
+            buffer->data[index] = (uint8_t)(janet_unwrap_integer(value) & 0xFF);
+            break;
+        }
         case JANET_TABLE:
             janet_table_put(janet_unwrap_table(ds), key, value);
             break;
-        case JANET_ABSTRACT:
-	  {
-	    JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
-	    if (type->put) {
-	      (type->put)(janet_unwrap_abstract(ds),key,value);
-	    } else {
-	      janet_panicf("no setter for %T ", JANET_TFLAG_LENGTHABLE, ds);
-	    }
-	    break;
-	  }
-	  
+        case JANET_ABSTRACT: {
+            JanetAbstractType *type = (JanetAbstractType *)janet_abstract_type(janet_unwrap_abstract(ds));
+            if (type->put) {
+                (type->put)(janet_unwrap_abstract(ds), key, value);
+            } else {
+                janet_panicf("no setter for %v ", ds);
+            }
+            break;
+        }
     }
 }

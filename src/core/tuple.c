@@ -21,7 +21,7 @@
 */
 
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
 #include "symcache.h"
 #include "gc.h"
 #include "util.h"
@@ -31,13 +31,12 @@
  * which should be filled with Janets. The memory will not be collected until
  * janet_tuple_end is called. */
 Janet *janet_tuple_begin(int32_t length) {
-    char *data = janet_gcalloc(JANET_MEMORY_TUPLE, 5 * sizeof(int32_t) + length * sizeof(Janet));
-    Janet *tuple = (Janet *)(data + (5 * sizeof(int32_t)));
-    janet_tuple_length(tuple) = length;
-    janet_tuple_sm_start(tuple) = -1;
-    janet_tuple_sm_end(tuple) = -1;
-    janet_tuple_flag(tuple) = 0;
-    return tuple;
+    size_t size = sizeof(JanetTupleHead) + (length * sizeof(Janet));
+    JanetTupleHead *head = janet_gcalloc(JANET_MEMORY_TUPLE, size);
+    head->sm_line = -1;
+    head->sm_column = -1;
+    head->length = length;
+    return (Janet *)(head->data);
 }
 
 /* Finish building a tuple */
@@ -101,29 +100,9 @@ static Janet cfun_tuple_brackets(int32_t argc, Janet *argv) {
 }
 
 static Janet cfun_tuple_slice(int32_t argc, Janet *argv) {
+    JanetView view = janet_getindexed(argv, 0);
     JanetRange range = janet_getslice(argc, argv);
-    JanetView view = janet_getindexed(argv, 0);
     return janet_wrap_tuple(janet_tuple_n(view.items + range.start, range.end - range.start));
-}
-
-static Janet cfun_tuple_prepend(int32_t argc, Janet *argv) {
-    janet_arity(argc, 1, -1);
-    JanetView view = janet_getindexed(argv, 0);
-    Janet *n = janet_tuple_begin(view.len - 1 + argc);
-    memcpy(n - 1 + argc, view.items, sizeof(Janet) * view.len);
-    for (int32_t i = 1; i < argc; i++) {
-        n[argc - i - 1] = argv[i];
-    }
-    return janet_wrap_tuple(janet_tuple_end(n));
-}
-
-static Janet cfun_tuple_append(int32_t argc, Janet *argv) {
-    janet_arity(argc, 1, -1);
-    JanetView view = janet_getindexed(argv, 0);
-    Janet *n = janet_tuple_begin(view.len - 1 + argc);
-    memcpy(n, view.items, sizeof(Janet) * view.len);
-    memcpy(n + view.len, argv + 1, sizeof(Janet) * (argc - 1));
-    return janet_wrap_tuple(janet_tuple_end(n));
 }
 
 static Janet cfun_tuple_type(int32_t argc, Janet *argv) {
@@ -136,41 +115,57 @@ static Janet cfun_tuple_type(int32_t argc, Janet *argv) {
     }
 }
 
+static Janet cfun_tuple_sourcemap(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    const Janet *tup = janet_gettuple(argv, 0);
+    Janet contents[2];
+    contents[0] = janet_wrap_integer(janet_tuple_head(tup)->sm_line);
+    contents[1] = janet_wrap_integer(janet_tuple_head(tup)->sm_column);
+    return janet_wrap_tuple(janet_tuple_n(contents, 2));
+}
+
+static Janet cfun_tuple_setmap(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 3);
+    const Janet *tup = janet_gettuple(argv, 0);
+    janet_tuple_head(tup)->sm_line = janet_getinteger(argv, 1);
+    janet_tuple_head(tup)->sm_column = janet_getinteger(argv, 2);
+    return argv[0];
+}
+
 static const JanetReg tuple_cfuns[] = {
     {
         "tuple/brackets", cfun_tuple_brackets,
         JDOC("(tuple/brackets & xs)\n\n"
-                "Creates a new bracketed tuple containing the elements xs.")
+             "Creates a new bracketed tuple containing the elements xs.")
     },
     {
         "tuple/slice", cfun_tuple_slice,
         JDOC("(tuple/slice arrtup [,start=0 [,end=(length arrtup)]])\n\n"
-                "Take a sub sequence of an array or tuple from index start "
-                "inclusive to index end exclusive. If start or end are not provided, "
-                "they default to 0 and the length of arrtup respectively."
-                "Returns the new tuple.")
-    },
-    {
-        "tuple/append", cfun_tuple_append,
-        JDOC("(tuple/append tup & items)\n\n"
-                "Returns a new tuple that is the result of appending "
-                "each element in items to tup.")
-    },
-    {
-        "tuple/prepend", cfun_tuple_prepend,
-        JDOC("(tuple/prepend tup & items)\n\n"
-                "Prepends each element in items to tuple and "
-                "returns a new tuple. Items are prepended such that the "
-                "last element in items is the first element in the new tuple.")
+             "Take a sub sequence of an array or tuple from index start "
+             "inclusive to index end exclusive. If start or end are not provided, "
+             "they default to 0 and the length of arrtup respectively."
+             "Returns the new tuple.")
     },
     {
         "tuple/type", cfun_tuple_type,
         JDOC("(tuple/type tup)\n\n"
-                "Checks how the tuple was constructed. Will return the keyword "
-                ":brackets if the tuple was parsed with brackets, and :parens "
-                "otherwise. The two types of tuples will behave the same most of "
-                "the time, but will print differently and be treated differently by "
-                "the compiler.")
+             "Checks how the tuple was constructed. Will return the keyword "
+             ":brackets if the tuple was parsed with brackets, and :parens "
+             "otherwise. The two types of tuples will behave the same most of "
+             "the time, but will print differently and be treated differently by "
+             "the compiler.")
+    },
+    {
+        "tuple/sourcemap", cfun_tuple_sourcemap,
+        JDOC("(tuple/sourcemap tup)\n\n"
+             "Returns the sourcemap metadata attached to a tuple, "
+             " which is another tuple (line, column).")
+    },
+    {
+        "tuple/setmap", cfun_tuple_setmap,
+        JDOC("(tuple/setmap tup line column)\n\n"
+             "Set the sourcemap metadata on a tuple. line and column indicate "
+             "should be integers.")
     },
     {NULL, NULL, NULL}
 };

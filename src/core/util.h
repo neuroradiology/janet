@@ -23,8 +23,33 @@
 #ifndef JANET_UTIL_H_defined
 #define JANET_UTIL_H_defined
 
+#include <stdio.h>
+#include <errno.h>
+
 #ifndef JANET_AMALG
-#include <janet/janet.h>
+#include <janet.h>
+#endif
+
+/* Handle runtime errors */
+#ifndef janet_exit
+#include <stdio.h>
+#define janet_exit(m) do { \
+    printf("C runtime error at line %d in file %s: %s\n",\
+        __LINE__,\
+        __FILE__,\
+        (m));\
+    exit(1);\
+} while (0)
+#endif
+
+#define janet_assert(c, m) do { \
+    if (!(c)) janet_exit((m)); \
+} while (0)
+
+/* What to do when out of memory */
+#ifndef JANET_OUT_OF_MEMORY
+#include <stdio.h>
+#define JANET_OUT_OF_MEMORY do { printf("janet out of memory\n"); exit(1); } while (0)
 #endif
 
 /* Omit docstrings in some builds */
@@ -48,16 +73,16 @@ Janet janet_dict_get(const JanetKV *buckets, int32_t cap, Janet key);
 void janet_memempty(JanetKV *mem, int32_t count);
 void *janet_memalloc_empty(int32_t count);
 const void *janet_strbinsearch(
-        const void *tab,
-        size_t tabcount,
-        size_t itemsize,
-        const uint8_t *key);
+    const void *tab,
+    size_t tabcount,
+    size_t itemsize,
+    const uint8_t *key);
 void janet_buffer_format(
-        JanetBuffer *b,
-        const char *strfrmt,
-        int32_t argstart,
-        int32_t argc,
-        Janet *argv);
+    JanetBuffer *b,
+    const char *strfrmt,
+    int32_t argstart,
+    int32_t argc,
+    Janet *argv);
 
 /* Inside the janet core, defining globals is different
  * at bootstrap time and normal runtime */
@@ -86,6 +111,14 @@ void janet_lib_asm(JanetTable *env);
 #endif
 void janet_lib_compile(JanetTable *env);
 void janet_lib_debug(JanetTable *env);
+#ifdef JANET_PEG
 void janet_lib_peg(JanetTable *env);
+#endif
+#ifdef JANET_TYPED_ARRAY
+void janet_lib_typed_array(JanetTable *env);
+#endif
+#ifdef JANET_INT_TYPES
+void janet_lib_inttypes(JanetTable *env);
+#endif
 
 #endif

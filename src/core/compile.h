@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -24,9 +24,17 @@
 #define JANET_COMPILE_H
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "regalloc.h"
 #endif
+
+/* Levels for compiler warnings */
+typedef enum {
+    JANET_C_LINT_RELAXED,
+    JANET_C_LINT_NORMAL,
+    JANET_C_LINT_STRICT
+} JanetCompileLintLevel;
 
 /* Tags for some functions for the prepared inliner */
 #define JANET_FUN_DEBUG 1
@@ -34,7 +42,7 @@
 #define JANET_FUN_APPLY 3
 #define JANET_FUN_YIELD 4
 #define JANET_FUN_RESUME 5
-#define JANET_FUN_GET 6
+#define JANET_FUN_IN 6
 #define JANET_FUN_PUT 7
 #define JANET_FUN_LENGTH 8
 #define JANET_FUN_ADD 9
@@ -48,19 +56,19 @@
 #define JANET_FUN_RSHIFT 17
 #define JANET_FUN_RSHIFTU 18
 #define JANET_FUN_BNOT 19
-#define JANET_FUN_ORDER_GT 20
-#define JANET_FUN_ORDER_LT 21
-#define JANET_FUN_ORDER_GTE 22
-#define JANET_FUN_ORDER_LTE 23
-#define JANET_FUN_ORDER_EQ 24
-#define JANET_FUN_ORDER_NEQ 25
-#define JANET_FUN_GT 26
-#define JANET_FUN_LT 27
-#define JANET_FUN_GTE 28
-#define JANET_FUN_LTE 29
-#define JANET_FUN_EQ 30
-#define JANET_FUN_NEQ 31
-#define JANET_FUN_PROP 32
+#define JANET_FUN_GT 20
+#define JANET_FUN_LT 21
+#define JANET_FUN_GTE 22
+#define JANET_FUN_LTE 23
+#define JANET_FUN_EQ 24
+#define JANET_FUN_NEQ 25
+#define JANET_FUN_PROP 26
+#define JANET_FUN_GET 27
+#define JANET_FUN_NEXT 28
+#define JANET_FUN_MODULO 29
+#define JANET_FUN_REMAINDER 30
+#define JANET_FUN_CMP 31
+#define JANET_FUN_CANCEL 32
 
 /* Compiler typedefs */
 typedef struct JanetCompiler JanetCompiler;
@@ -77,10 +85,10 @@ typedef struct JanetSpecial JanetSpecial;
 #define JANET_SLOT_MUTABLE 0x40000
 #define JANET_SLOT_REF 0x80000
 #define JANET_SLOT_RETURNED 0x100000
-/* Needed for handling single element arrays as global vars. */
-
-/* Used for unquote-splicing */
-#define JANET_SLOT_SPLICED 0x200000
+#define JANET_SLOT_DEP_NOTE 0x200000
+#define JANET_SLOT_DEP_WARN 0x400000
+#define JANET_SLOT_DEP_ERROR 0x800000
+#define JANET_SLOT_SPLICED 0x1000000
 
 #define JANET_SLOTTYPE_ANY 0xFFFF
 
@@ -103,13 +111,21 @@ struct JanetSlot {
 typedef struct SymPair {
     JanetSlot slot;
     const uint8_t *sym;
+    const uint8_t *sym2;
     int keep;
+    uint32_t birth_pc;
+    uint32_t death_pc;
 } SymPair;
+
+typedef struct JanetEnvRef {
+    int32_t envindex;
+    JanetScope *scope;
+} JanetEnvRef;
 
 /* A lexical scope during compilation */
 struct JanetScope {
 
-    /* For debugging */
+    /* For debugging the compiler */
     const char *name;
 
     /* Scopes are doubly linked list */
@@ -125,13 +141,16 @@ struct JanetScope {
     /* FuncDefs */
     JanetFuncDef **defs;
 
-    /* Regsiter allocator */
+    /* Register allocator */
     JanetcRegisterAllocator ra;
 
-    /* Referenced closure environents. The values at each index correspond
+    /* Upvalue allocator */
+    JanetcRegisterAllocator ua;
+
+    /* Referenced closure environments. The values at each index correspond
      * to which index to get the environment from in the parent. The environment
      * that corresponds to the direct parent's stack will always have value 0. */
-    int32_t *envs;
+    JanetEnvRef *envs;
 
     int32_t bytecode_start;
     int flags;
@@ -160,11 +179,15 @@ struct JanetCompiler {
 
     /* Prevent unbounded recursion */
     int recursion_guard;
+
+    /* Collect linting results */
+    JanetArray *lints;
 };
 
 #define JANET_FOPTS_TAIL 0x10000
 #define JANET_FOPTS_HINT 0x20000
 #define JANET_FOPTS_DROP 0x40000
+#define JANET_FOPTS_ACCEPT_SPLICE 0x80000
 
 /* Options for compiling a single form */
 struct JanetFopts {
@@ -213,7 +236,7 @@ JanetSlot *janetc_toslots(JanetCompiler *c, const Janet *vals, int32_t len);
 /* Get a bunch of slots for function arguments */
 JanetSlot *janetc_toslotskv(JanetCompiler *c, Janet ds);
 
-/* Push slots load via janetc_toslots. */
+/* Push slots loaded via janetc_toslots. */
 int32_t janetc_pushslots(JanetCompiler *c, JanetSlot *slots);
 
 /* Free slots loaded via janetc_toslots */
@@ -225,6 +248,9 @@ JanetSlot janetc_return(JanetCompiler *c, JanetSlot s);
 /* Store an error */
 void janetc_error(JanetCompiler *c, const uint8_t *m);
 void janetc_cerror(JanetCompiler *c, const char *m);
+
+/* Linting */
+void janetc_lintf(JanetCompiler *C, JanetCompileLintLevel level, const char *format, ...);
 
 /* Dispatch to correct form compiler */
 JanetSlot janetc_value(JanetFopts opts, Janet x);
@@ -240,5 +266,9 @@ JanetSlot janetc_cslot(Janet x);
 
 /* Search for a symbol */
 JanetSlot janetc_resolve(JanetCompiler *c, const uint8_t *sym);
+
+/* Bytecode optimization */
+void janet_bytecode_movopt(JanetFuncDef *def);
+void janet_bytecode_remove_noops(JanetFuncDef *def);
 
 #endif

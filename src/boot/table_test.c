@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -60,6 +60,12 @@ int table_test() {
 
     assert(janet_equals(janet_table_get(t2, janet_csymbolv("t2key1")), janet_wrap_integer(10)));
     assert(janet_equals(janet_table_get(t2, janet_csymbolv("t2key2")), janet_wrap_integer(100)));
+
+    assert(t2->count == 4);
+    assert(janet_equals(janet_table_remove(t2, janet_csymbolv("t2key1")), janet_wrap_integer(10)));
+    assert(t2->count == 3);
+    assert(janet_equals(janet_table_remove(t2, janet_csymbolv("t2key2")), janet_wrap_integer(100)));
+    assert(t2->count == 2);
 
     return 0;
 }

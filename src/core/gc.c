@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,28 +21,15 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "state.h"
 #include "symcache.h"
 #include "gc.h"
 #include "util.h"
+#include "fiber.h"
+#include "vector.h"
 #endif
-
-/* GC State */
-JANET_THREAD_LOCAL void *janet_vm_blocks;
-JANET_THREAD_LOCAL uint32_t janet_vm_gc_interval;
-JANET_THREAD_LOCAL uint32_t janet_vm_next_collection;
-JANET_THREAD_LOCAL int janet_vm_gc_suspend = 0;
-
-/* Roots */
-JANET_THREAD_LOCAL Janet *janet_vm_roots;
-JANET_THREAD_LOCAL uint32_t janet_vm_root_count;
-JANET_THREAD_LOCAL uint32_t janet_vm_root_capacity;
-
-/* Scratch Memory */
-JANET_THREAD_LOCAL void **janet_scratch_mem;
-JANET_THREAD_LOCAL size_t janet_scratch_cap;
-JANET_THREAD_LOCAL size_t janet_scratch_len;
 
 /* Helpers for marking the various gc types */
 static void janet_mark_funcenv(JanetFuncEnv *env);
@@ -57,9 +44,14 @@ static void janet_mark_string(const uint8_t *str);
 static void janet_mark_fiber(JanetFiber *fiber);
 static void janet_mark_abstract(void *adata);
 
-/* Local state that is only temporary */
+/* Local state that is only temporary for gc */
 static JANET_THREAD_LOCAL uint32_t depth = JANET_RECURSION_GUARD;
-static JANET_THREAD_LOCAL uint32_t orig_rootcount;
+static JANET_THREAD_LOCAL size_t orig_rootcount;
+
+/* Hint to the GC that we may need to collect */
+void janet_gcpressure(size_t s) {
+    janet_vm.next_collection += s;
+}
 
 /* Mark a value */
 void janet_mark(Janet x) {
@@ -113,6 +105,14 @@ static void janet_mark_buffer(JanetBuffer *buffer) {
 }
 
 static void janet_mark_abstract(void *adata) {
+#ifdef JANET_EV
+    /* Check if abstract type is a threaded abstract type. If it is, marking means
+     * updating the threaded_abstract table. */
+    if ((janet_abstract_head(adata)->gc.flags & JANET_MEM_TYPEBITS) == JANET_MEMORY_THREADED_ABSTRACT) {
+        janet_table_put(&janet_vm.threaded_abstracts, janet_wrap_abstract(adata), janet_wrap_true());
+        return;
+    }
+#endif
     if (janet_gc_reachable(janet_abstract_head(adata)))
         return;
     janet_gc_mark(janet_abstract_head(adata));
@@ -123,6 +123,8 @@ static void janet_mark_abstract(void *adata) {
 
 /* Mark a bunch of items in memory */
 static void janet_mark_many(const Janet *values, int32_t n) {
+    if (values == NULL)
+        return;
     const Janet *end = values + n;
     while (values < end) {
         janet_mark(*values);
@@ -160,10 +162,13 @@ recur: /* Manual tail recursion */
 }
 
 static void janet_mark_struct(const JanetKV *st) {
+recur:
     if (janet_gc_reachable(janet_struct_head(st)))
         return;
     janet_gc_mark(janet_struct_head(st));
     janet_mark_kvs(st, janet_struct_capacity(st));
+    st = janet_struct_proto(st);
+    if (st) goto recur;
 }
 
 static void janet_mark_tuple(const Janet *tuple) {
@@ -178,7 +183,10 @@ static void janet_mark_funcenv(JanetFuncEnv *env) {
     if (janet_gc_reachable(env))
         return;
     janet_gc_mark(env);
-    if (env->offset) {
+    /* If closure env references a dead fiber, we can just copy out the stack frame we need so
+     * we don't need to keep around the whole dead fiber. */
+    janet_env_maybe_detach(env);
+    if (env->offset > 0) {
         /* On stack */
         janet_mark_fiber(env->as.fiber);
     } else {
@@ -201,6 +209,12 @@ static void janet_mark_funcdef(JanetFuncDef *def) {
         janet_mark_string(def->source);
     if (def->name)
         janet_mark_string(def->name);
+    if (def->symbolmap) {
+        for (int i = 0; i < def->symbolmap_length; i++) {
+            janet_mark_string(def->symbolmap[i].symbol);
+        }
+    }
+
 }
 
 static void janet_mark_function(JanetFunction *func) {
@@ -209,11 +223,14 @@ static void janet_mark_function(JanetFunction *func) {
     if (janet_gc_reachable(func))
         return;
     janet_gc_mark(func);
-    numenvs = func->def->environments_length;
-    for (i = 0; i < numenvs; ++i) {
-        janet_mark_funcenv(func->envs[i]);
+    if (NULL != func->def) {
+        /* this should always be true, except if function is only partially constructed */
+        numenvs = func->def->environments_length;
+        for (i = 0; i < numenvs; ++i) {
+            janet_mark_funcenv(func->envs[i]);
+        }
+        janet_mark_funcdef(func->def);
     }
-    janet_mark_funcdef(func->def);
 }
 
 static void janet_mark_fiber(JanetFiber *fiber) {
@@ -223,6 +240,8 @@ recur:
     if (janet_gc_reachable(fiber))
         return;
     janet_gc_mark(fiber);
+
+    janet_mark(fiber->last_value);
 
     /* Mark values on the argument stack */
     janet_mark_many(fiber->data + fiber->stackstart,
@@ -245,6 +264,12 @@ recur:
     if (fiber->env)
         janet_mark_table(fiber->env);
 
+#ifdef JANET_EV
+    if (fiber->supervisor_channel) {
+        janet_mark_abstract(fiber->supervisor_channel);
+    }
+#endif
+
     /* Explicit tail recursion */
     if (fiber->child) {
         fiber = fiber->child;
@@ -262,13 +287,13 @@ static void janet_deinit_block(JanetGCObject *mem) {
             janet_symbol_deinit(((JanetStringHead *) mem)->data);
             break;
         case JANET_MEMORY_ARRAY:
-            free(((JanetArray *) mem)->data);
+            janet_free(((JanetArray *) mem)->data);
             break;
         case JANET_MEMORY_TABLE:
-            free(((JanetTable *) mem)->data);
+            janet_free(((JanetTable *) mem)->data);
             break;
         case JANET_MEMORY_FIBER:
-            free(((JanetFiber *)mem)->data);
+            janet_free(((JanetFiber *)mem)->data);
             break;
         case JANET_MEMORY_BUFFER:
             janet_buffer_deinit((JanetBuffer *) mem);
@@ -283,17 +308,19 @@ static void janet_deinit_block(JanetGCObject *mem) {
         case JANET_MEMORY_FUNCENV: {
             JanetFuncEnv *env = (JanetFuncEnv *)mem;
             if (0 == env->offset)
-                free(env->as.values);
+                janet_free(env->as.values);
         }
         break;
         case JANET_MEMORY_FUNCDEF: {
             JanetFuncDef *def = (JanetFuncDef *)mem;
             /* TODO - get this all with one alloc and one free */
-            free(def->defs);
-            free(def->environments);
-            free(def->constants);
-            free(def->bytecode);
-            free(def->sourcemap);
+            janet_free(def->defs);
+            janet_free(def->environments);
+            janet_free(def->constants);
+            janet_free(def->bytecode);
+            janet_free(def->sourcemap);
+            janet_free(def->closure_bitset);
+            janet_free(def->symbolmap);
         }
         break;
     }
@@ -303,24 +330,61 @@ static void janet_deinit_block(JanetGCObject *mem) {
  * marked as reachable. Flip the gc color flag for next sweep. */
 void janet_sweep() {
     JanetGCObject *previous = NULL;
-    JanetGCObject *current = janet_vm_blocks;
+    JanetGCObject *current = janet_vm.blocks;
     JanetGCObject *next;
     while (NULL != current) {
-        next = current->next;
+        next = current->data.next;
         if (current->flags & (JANET_MEM_REACHABLE | JANET_MEM_DISABLED)) {
             previous = current;
             current->flags &= ~JANET_MEM_REACHABLE;
         } else {
+            janet_vm.block_count--;
             janet_deinit_block(current);
             if (NULL != previous) {
-                previous->next = next;
+                previous->data.next = next;
             } else {
-                janet_vm_blocks = next;
+                janet_vm.blocks = next;
             }
-            free(current);
+            janet_free(current);
         }
         current = next;
     }
+#ifdef JANET_EV
+    /* Sweep threaded abstract types for references to decrement */
+    JanetKV *items = janet_vm.threaded_abstracts.data;
+    for (int32_t i = 0; i < janet_vm.threaded_abstracts.capacity; i++) {
+        if (janet_checktype(items[i].key, JANET_ABSTRACT)) {
+
+            /* If item was not visited during the mark phase, then this
+             * abstract type isn't present in the heap and needs its refcount
+             * decremented, and shouuld be removed from table. If the refcount is
+             * then 0, the item will be collected. This ensures that only one interpreter
+             * will clean up the threaded abstract. */
+
+            /* If not visited... */
+            if (!janet_truthy(items[i].value)) {
+                void *abst = janet_unwrap_abstract(items[i].key);
+                if (0 == janet_abstract_decref(abst)) {
+                    /* Run finalizer */
+                    JanetAbstractHead *head = janet_abstract_head(abst);
+                    if (head->type->gc) {
+                        janet_assert(!head->type->gc(head->data, head->size), "finalizer failed");
+                    }
+                    /* Mark as tombstone in place */
+                    items[i].key = janet_wrap_nil();
+                    items[i].value = janet_wrap_false();
+                    janet_vm.threaded_abstracts.deleted++;
+                    janet_vm.threaded_abstracts.count--;
+                    /* Free memory */
+                    janet_free(janet_abstract_head(abst));
+                }
+            }
+
+            /* Reset for next sweep */
+            items[i].value = janet_wrap_false();
+        }
+    }
+#endif
 }
 
 /* Allocate some memory that is tracked for garbage collection */
@@ -328,8 +392,8 @@ void *janet_gcalloc(enum JanetMemoryType type, size_t size) {
     JanetGCObject *mem;
 
     /* Make sure everything is inited */
-    janet_assert(NULL != janet_vm_cache, "please initialize janet before use");
-    mem = malloc(size);
+    janet_assert(NULL != janet_vm.cache, "please initialize janet before use");
+    mem = janet_malloc(size);
 
     /* Check for bad malloc */
     if (NULL == mem) {
@@ -340,34 +404,60 @@ void *janet_gcalloc(enum JanetMemoryType type, size_t size) {
     mem->flags = type;
 
     /* Prepend block to heap list */
-    janet_vm_next_collection += (int32_t) size;
-    mem->next = janet_vm_blocks;
-    janet_vm_blocks = mem;
+    janet_vm.next_collection += size;
+    mem->data.next = janet_vm.blocks;
+    janet_vm.blocks = mem;
+    janet_vm.block_count++;
 
     return (void *)mem;
 }
 
+static void free_one_scratch(JanetScratch *s) {
+    if (NULL != s->finalize) {
+        s->finalize((char *) s->mem);
+    }
+    janet_free(s);
+}
+
 /* Free all allocated scratch memory */
 static void janet_free_all_scratch(void) {
-    for (size_t i = 0; i < janet_scratch_len; i++)
-        free(janet_scratch_mem[i]);
-    janet_scratch_len = 0;
+    for (size_t i = 0; i < janet_vm.scratch_len; i++) {
+        free_one_scratch(janet_vm.scratch_mem[i]);
+    }
+    janet_vm.scratch_len = 0;
+}
+
+static JanetScratch *janet_mem2scratch(void *mem) {
+    JanetScratch *s = (JanetScratch *)mem;
+    return s - 1;
 }
 
 /* Run garbage collection */
 void janet_collect(void) {
     uint32_t i;
-    if (janet_vm_gc_suspend) return;
+    if (janet_vm.gc_suspend) return;
     depth = JANET_RECURSION_GUARD;
-    orig_rootcount = janet_vm_root_count;
+    /* Try and prevent many major collections back to back.
+     * A full collection will take O(janet_vm.block_count) time.
+     * If we have a large heap, make sure our interval is not too
+     * small so we won't make many collections over it. This is just a
+     * heuristic for automatically changing the gc interval */
+    if (janet_vm.block_count * 8 > janet_vm.gc_interval) {
+        janet_vm.gc_interval = janet_vm.block_count * sizeof(JanetGCObject);
+    }
+    orig_rootcount = janet_vm.root_count;
+#ifdef JANET_EV
+    janet_ev_mark();
+#endif
+    janet_mark_fiber(janet_vm.root_fiber);
     for (i = 0; i < orig_rootcount; i++)
-        janet_mark(janet_vm_roots[i]);
-    while (orig_rootcount < janet_vm_root_count) {
-        Janet x = janet_vm_roots[--janet_vm_root_count];
+        janet_mark(janet_vm.roots[i]);
+    while (orig_rootcount < janet_vm.root_count) {
+        Janet x = janet_vm.roots[--janet_vm.root_count];
         janet_mark(x);
     }
     janet_sweep();
-    janet_vm_next_collection = 0;
+    janet_vm.next_collection = 0;
     janet_free_all_scratch();
 }
 
@@ -375,17 +465,17 @@ void janet_collect(void) {
  * and all of its children. If gcroot is called on a value n times, unroot
  * must also be called n times to remove it as a gc root. */
 void janet_gcroot(Janet root) {
-    uint32_t newcount = janet_vm_root_count + 1;
-    if (newcount > janet_vm_root_capacity) {
-        uint32_t newcap = 2 * newcount;
-        janet_vm_roots = realloc(janet_vm_roots, sizeof(Janet) * newcap);
-        if (NULL == janet_vm_roots) {
+    size_t newcount = janet_vm.root_count + 1;
+    if (newcount > janet_vm.root_capacity) {
+        size_t newcap = 2 * newcount;
+        janet_vm.roots = janet_realloc(janet_vm.roots, sizeof(Janet) * newcap);
+        if (NULL == janet_vm.roots) {
             JANET_OUT_OF_MEMORY;
         }
-        janet_vm_root_capacity = newcap;
+        janet_vm.root_capacity = newcap;
     }
-    janet_vm_roots[janet_vm_root_count] = root;
-    janet_vm_root_count = newcount;
+    janet_vm.roots[janet_vm.root_count] = root;
+    janet_vm.root_count = newcount;
 }
 
 /* Identity equality for GC purposes */
@@ -406,11 +496,11 @@ static int janet_gc_idequals(Janet lhs, Janet rhs) {
 /* Remove a root value from the GC. This allows the gc to potentially reclaim
  * a value and all its children. */
 int janet_gcunroot(Janet root) {
-    Janet *vtop = janet_vm_roots + janet_vm_root_count;
+    Janet *vtop = janet_vm.roots + janet_vm.root_count;
     /* Search from top to bottom as access is most likely LIFO */
-    for (Janet *v = janet_vm_roots; v < vtop; v++) {
+    for (Janet *v = janet_vm.roots; v < vtop; v++) {
         if (janet_gc_idequals(root, *v)) {
-            *v = janet_vm_roots[--janet_vm_root_count];
+            *v = janet_vm.roots[--janet_vm.root_count];
             return 1;
         }
     }
@@ -419,12 +509,12 @@ int janet_gcunroot(Janet root) {
 
 /* Remove a root value from the GC. This sets the effective reference count to 0. */
 int janet_gcunrootall(Janet root) {
-    Janet *vtop = janet_vm_roots + janet_vm_root_count;
+    Janet *vtop = janet_vm.roots + janet_vm.root_count;
     int ret = 0;
     /* Search from top to bottom as access is most likely LIFO */
-    for (Janet *v = janet_vm_roots; v < vtop; v++) {
+    for (Janet *v = janet_vm.roots; v < vtop; v++) {
         if (janet_gc_idequals(root, *v)) {
-            *v = janet_vm_roots[--janet_vm_root_count];
+            *v = janet_vm.roots[--janet_vm.root_count];
             vtop--;
             ret = 1;
         }
@@ -434,75 +524,108 @@ int janet_gcunrootall(Janet root) {
 
 /* Free all allocated memory */
 void janet_clear_memory(void) {
-    JanetGCObject *current = janet_vm_blocks;
+#ifdef JANET_EV
+    JanetKV *items = janet_vm.threaded_abstracts.data;
+    for (int32_t i = 0; i < janet_vm.threaded_abstracts.capacity; i++) {
+        if (janet_checktype(items[i].key, JANET_ABSTRACT)) {
+            void *abst = janet_unwrap_abstract(items[i].key);
+            if (0 == janet_abstract_decref(abst)) {
+                JanetAbstractHead *head = janet_abstract_head(abst);
+                if (head->type->gc) {
+                    janet_assert(!head->type->gc(head->data, head->size), "finalizer failed");
+                }
+                janet_free(janet_abstract_head(abst));
+            }
+        }
+    }
+#endif
+    JanetGCObject *current = janet_vm.blocks;
     while (NULL != current) {
         janet_deinit_block(current);
-        JanetGCObject *next = current->next;
-        free(current);
+        JanetGCObject *next = current->data.next;
+        janet_free(current);
         current = next;
     }
-    janet_vm_blocks = NULL;
+    janet_vm.blocks = NULL;
     janet_free_all_scratch();
-    free(janet_scratch_mem);
+    janet_free(janet_vm.scratch_mem);
 }
 
 /* Primitives for suspending GC. */
 int janet_gclock(void) {
-    return janet_vm_gc_suspend++;
+    return janet_vm.gc_suspend++;
 }
 void janet_gcunlock(int handle) {
-    janet_vm_gc_suspend = handle;
+    janet_vm.gc_suspend = handle;
 }
 
 /* Scratch memory API */
 
 void *janet_smalloc(size_t size) {
-    void *mem = malloc(size);
-    if (NULL == mem) {
+    JanetScratch *s = janet_malloc(sizeof(JanetScratch) + size);
+    if (NULL == s) {
         JANET_OUT_OF_MEMORY;
     }
-    if (janet_scratch_len == janet_scratch_cap) {
-        size_t newcap = 2 * janet_scratch_cap + 2;
-        void **newmem = (void **) realloc(janet_scratch_mem, newcap * sizeof(void *));
+    s->finalize = NULL;
+    if (janet_vm.scratch_len == janet_vm.scratch_cap) {
+        size_t newcap = 2 * janet_vm.scratch_cap + 2;
+        JanetScratch **newmem = (JanetScratch **) janet_realloc(janet_vm.scratch_mem, newcap * sizeof(JanetScratch));
         if (NULL == newmem) {
             JANET_OUT_OF_MEMORY;
         }
-        janet_scratch_cap = newcap;
-        janet_scratch_mem = newmem;
+        janet_vm.scratch_cap = newcap;
+        janet_vm.scratch_mem = newmem;
     }
-    janet_scratch_mem[janet_scratch_len++] = mem;
-    return mem;
+    janet_vm.scratch_mem[janet_vm.scratch_len++] = s;
+    return (char *)(s->mem);
+}
+
+void *janet_scalloc(size_t nmemb, size_t size) {
+    if (nmemb && size > SIZE_MAX / nmemb) {
+        JANET_OUT_OF_MEMORY;
+    }
+    size_t n = nmemb * size;
+    void *p = janet_smalloc(n);
+    memset(p, 0, n);
+    return p;
 }
 
 void *janet_srealloc(void *mem, size_t size) {
     if (NULL == mem) return janet_smalloc(size);
-    if (janet_scratch_len) {
-        for (size_t i = janet_scratch_len - 1; ; i--) {
-            if (janet_scratch_mem[i] == mem) {
-                void *newmem = realloc(mem, size);
-                if (NULL == newmem) {
+    JanetScratch *s = janet_mem2scratch(mem);
+    if (janet_vm.scratch_len) {
+        for (size_t i = janet_vm.scratch_len - 1; ; i--) {
+            if (janet_vm.scratch_mem[i] == s) {
+                JanetScratch *news = janet_realloc(s, size + sizeof(JanetScratch));
+                if (NULL == news) {
                     JANET_OUT_OF_MEMORY;
                 }
-                janet_scratch_mem[i] = newmem;
-                return newmem;
+                janet_vm.scratch_mem[i] = news;
+                return (char *)(news->mem);
             }
             if (i == 0) break;
         }
     }
-    janet_exit("invalid janet_srealloc");
+    JANET_EXIT("invalid janet_srealloc");
+}
+
+void janet_sfinalizer(void *mem, JanetScratchFinalizer finalizer) {
+    JanetScratch *s = janet_mem2scratch(mem);
+    s->finalize = finalizer;
 }
 
 void janet_sfree(void *mem) {
     if (NULL == mem) return;
-    if (janet_scratch_len) {
-        for (size_t i = janet_scratch_len - 1; ; i--) {
-            if (janet_scratch_mem[i] == mem) {
-                janet_scratch_mem[i] = janet_scratch_mem[--janet_scratch_len];
-                free(mem);
+    JanetScratch *s = janet_mem2scratch(mem);
+    if (janet_vm.scratch_len) {
+        for (size_t i = janet_vm.scratch_len - 1; ; i--) {
+            if (janet_vm.scratch_mem[i] == s) {
+                janet_vm.scratch_mem[i] = janet_vm.scratch_mem[--janet_vm.scratch_len];
+                free_one_scratch(s);
                 return;
             }
             if (i == 0) break;
         }
     }
-    janet_exit("invalid janet_sfree");
+    JANET_EXIT("invalid janet_sfree");
 }

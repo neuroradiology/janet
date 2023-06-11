@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -24,6 +24,7 @@
 #define JANET_VECTOR_H_defined
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #endif
 

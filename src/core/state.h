@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,51 +23,176 @@
 #ifndef JANET_STATE_H_defined
 #define JANET_STATE_H_defined
 
+#include <janet.h>
 #include <stdint.h>
 
-/* The VM state. Rather than a struct that is passed
- * around, the vm state is global for simplicity. If
- * at some point a global state object, or context,
- * is required to be passed around, this is what would
- * be in it. However, thread local global variables for interpreter
- * state should allow easy multi-threading. */
+#ifdef JANET_EV
+#ifndef JANET_WINDOWS
+#include <pthread.h>
+#endif
+#endif
 
-/* How many VM stacks have been entered */
-extern JANET_THREAD_LOCAL int janet_vm_stackn;
+typedef int64_t JanetTimestamp;
 
-/* The current running fiber on the current thread.
- * Set and unset by janet_run. */
-extern JANET_THREAD_LOCAL JanetFiber *janet_vm_fiber;
+typedef struct JanetScratch {
+    JanetScratchFinalizer finalize;
+    long long mem[]; /* for proper alignment */
+} JanetScratch;
 
-/* The current pointer to the inner most jmp_buf. The current
- * return point for panics. */
-extern JANET_THREAD_LOCAL jmp_buf *janet_vm_jmp_buf;
-extern JANET_THREAD_LOCAL Janet *janet_vm_return_reg;
+typedef struct {
+    JanetGCObject *self;
+    JanetGCObject *other;
+    int32_t index;
+    int32_t index2;
+} JanetTraversalNode;
 
-/* The global registry for c functions. Used to store meta-data
- * along with otherwise bare c function pointers. */
-extern JANET_THREAD_LOCAL JanetTable *janet_vm_registry;
+typedef struct {
+    int32_t capacity;
+    int32_t head;
+    int32_t tail;
+    void *data;
+} JanetQueue;
 
-/* Immutable value cache */
-extern JANET_THREAD_LOCAL const uint8_t **janet_vm_cache;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_cache_capacity;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_cache_count;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_cache_deleted;
+typedef struct {
+    JanetTimestamp when;
+    JanetFiber *fiber;
+    JanetFiber *curr_fiber;
+    uint32_t sched_id;
+    int is_error;
+} JanetTimeout;
 
-/* Garbage collection */
-extern JANET_THREAD_LOCAL void *janet_vm_blocks;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_gc_interval;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_next_collection;
-extern JANET_THREAD_LOCAL int janet_vm_gc_suspend;
+/* Registry table for C functions - contains metadata that can
+ * be looked up by cfunction pointer. All strings here are pointing to
+ * static memory not managed by Janet. */
+typedef struct {
+    JanetCFunction cfun;
+    const char *name;
+    const char *name_prefix;
+    const char *source_file;
+    int32_t source_line;
+    /* int32_t min_arity; */
+    /* int32_t max_arity; */
+} JanetCFunRegistry;
 
-/* GC roots */
-extern JANET_THREAD_LOCAL Janet *janet_vm_roots;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_root_count;
-extern JANET_THREAD_LOCAL uint32_t janet_vm_root_capacity;
+struct JanetVM {
+    /* Place for user data */
+    void *user;
 
-/* Scratch memory */
-extern JANET_THREAD_LOCAL void **janet_scratch_mem;
-extern JANET_THREAD_LOCAL size_t janet_scratch_cap;
-extern JANET_THREAD_LOCAL size_t janet_scratch_len;
+    /* Top level dynamic bindings */
+    JanetTable *top_dyns;
+
+    /* Cache the core environment */
+    JanetTable *core_env;
+
+    /* How many VM stacks have been entered */
+    int stackn;
+
+    /* If this flag is true, suspend on function calls and backwards jumps.
+     * When this occurs, this flag will be reset to 0. */
+    int auto_suspend;
+
+    /* The current running fiber on the current thread.
+     * Set and unset by functions in vm.c */
+    JanetFiber *fiber;
+    JanetFiber *root_fiber;
+
+    /* The current pointer to the inner most jmp_buf. The current
+     * return point for panics. */
+    jmp_buf *signal_buf;
+    Janet *return_reg;
+
+    /* The global registry for c functions. Used to store meta-data
+     * along with otherwise bare c function pointers. */
+    JanetCFunRegistry *registry;
+    size_t registry_cap;
+    size_t registry_count;
+    int registry_dirty;
+
+    /* Registry for abstract types that can be marshalled.
+     * We need this to look up the constructors when unmarshalling. */
+    JanetTable *abstract_registry;
+
+    /* Immutable value cache */
+    const uint8_t **cache;
+    uint32_t cache_capacity;
+    uint32_t cache_count;
+    uint32_t cache_deleted;
+    uint8_t gensym_counter[8];
+
+    /* Garbage collection */
+    void *blocks;
+    size_t gc_interval;
+    size_t next_collection;
+    size_t block_count;
+    int gc_suspend;
+
+    /* GC roots */
+    Janet *roots;
+    size_t root_count;
+    size_t root_capacity;
+
+    /* Scratch memory */
+    JanetScratch **scratch_mem;
+    size_t scratch_cap;
+    size_t scratch_len;
+
+    /* Sandbox flags */
+    uint32_t sandbox_flags;
+
+    /* Random number generator */
+    JanetRNG rng;
+
+    /* Traversal pointers */
+    JanetTraversalNode *traversal;
+    JanetTraversalNode *traversal_top;
+    JanetTraversalNode *traversal_base;
+
+    /* Event loop and scheduler globals */
+#ifdef JANET_EV
+    size_t tq_count;
+    size_t tq_capacity;
+    JanetQueue spawn;
+    JanetTimeout *tq;
+    JanetRNG ev_rng;
+    JanetListenerState **listeners;
+    size_t listener_count;
+    size_t listener_cap;
+    size_t extra_listeners;
+    JanetTable threaded_abstracts; /* All abstract types that can be shared between threads (used in this thread) */
+    JanetTable active_tasks; /* All possibly live task fibers - used just for tracking */
+#ifdef JANET_WINDOWS
+    void **iocp;
+#elif defined(JANET_EV_EPOLL)
+    pthread_attr_t new_thread_attr;
+    JanetHandle selfpipe[2];
+    int epoll;
+    int timerfd;
+    int timer_enabled;
+#elif defined(JANET_EV_KQUEUE)
+    pthread_attr_t new_thread_attr;
+    JanetHandle selfpipe[2];
+    int kq;
+    int timer;
+    int timer_enabled;
+#else
+    pthread_attr_t new_thread_attr;
+    JanetHandle selfpipe[2];
+    struct pollfd *fds;
+#endif
+#endif
+
+};
+
+extern JANET_THREAD_LOCAL JanetVM janet_vm;
+
+#ifdef JANET_NET
+void janet_net_init(void);
+void janet_net_deinit(void);
+#endif
+
+#ifdef JANET_EV
+void janet_ev_init(void);
+void janet_ev_deinit(void);
+#endif
 
 #endif /* JANET_STATE_H_defined */

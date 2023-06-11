@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -40,13 +40,14 @@
  * '0xdeadbeef'.
  */
 
-#include <math.h>
-#include <string.h>
-
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "util.h"
 #endif
+
+#include <math.h>
+#include <string.h>
 
 /* Lookup table for getting values of characters when parsing numbers. Handles
  * digits 0-9 and a-z (and A-Z). A-Z have values of 10 to 35. */
@@ -86,7 +87,7 @@ static uint32_t *bignat_extra(struct BigNat *mant, int32_t n) {
     int32_t newn = oldn + n;
     if (mant->cap < newn) {
         int32_t newcap = 2 * newn;
-        uint32_t *mem = realloc(mant->digits, newcap * sizeof(uint32_t));
+        uint32_t *mem = janet_realloc(mant->digits, (size_t) newcap * sizeof(uint32_t));
         if (NULL == mem) {
             JANET_OUT_OF_MEMORY;
         }
@@ -196,7 +197,7 @@ static double bignat_extract(struct BigNat *mant, int32_t exponent2) {
 
 /* Read in a mantissa and exponent of a certain base, and give
  * back the double value. Should properly handle 0s, infinities, and
- * denormalized numbers. (When the exponent values are too large) */
+ * denormalized numbers. (When the exponent values are too large or small) */
 static double convert(
     int negative,
     struct BigNat *mant,
@@ -205,11 +206,20 @@ static double convert(
 
     int32_t exponent2 = 0;
 
-    /* Short circuit zero and huge numbers */
+    /* Approximate exponent in base 2 of mant and exponent. This should get us a good estimate of the final size of the
+     * number, within * 2^32 or so. */
+    int64_t mant_exp2_approx = mant->n * 32 + 16;
+    int64_t exp_exp2_approx = (int64_t)(floor(log2(base) * exponent));
+    int64_t exp2_approx = mant_exp2_approx + exp_exp2_approx;
+
+    /* Short circuit zero, huge, and small numbers. We use the exponent range of valid IEEE754 doubles (-1022, 1023)
+     * with a healthy buffer to allow for inaccuracies in the approximation and denormailzed numbers. */
     if (mant->n == 0 && mant->first_digit == 0)
         return negative ? -0.0 : 0.0;
-    if (exponent > 1023)
+    if (exp2_approx > 1176)
         return negative ? -INFINITY : INFINITY;
+    if (exp2_approx < -1175)
+        return negative ? -0.0 : 0.0;
 
     /* Final value is X = mant * base ^ exponent * 2 ^ exponent2
      * Get exponent to zero while holding X constant. */
@@ -236,15 +246,15 @@ static double convert(
 }
 
 /* Scan a real (double) from a string. If the string cannot be converted into
- * and integer, set *err to 1 and return 0. */
-int janet_scan_number(
+ * and integer, return 0. */
+int janet_scan_number_base(
     const uint8_t *str,
     int32_t len,
+    int32_t base,
     double *out) {
     const uint8_t *end = str + len;
     int seenadigit = 0;
     int ex = 0;
-    int base = 10;
     int seenpoint = 0;
     int foundexp = 0;
     int neg = 0;
@@ -268,21 +278,28 @@ int janet_scan_number(
     }
 
     /* Check for leading 0x or digit digit r */
-    if (str + 1 < end && str[0] == '0' && str[1] == 'x') {
-        base = 16;
-        str += 2;
-    } else if (str + 1 < end  &&
-               str[0] >= '0' && str[0] <= '9' &&
-               str[1] == 'r') {
-        base = str[0] - '0';
-        str += 2;
-    } else if (str + 2 < end  &&
-               str[0] >= '0' && str[0] <= '9' &&
-               str[1] >= '0' && str[1] <= '9' &&
-               str[2] == 'r') {
-        base = 10 * (str[0] - '0') + (str[1] - '0');
-        if (base < 2 || base > 36) goto error;
-        str += 3;
+    if (base == 0) {
+        if (str + 1 < end && str[0] == '0' && str[1] == 'x') {
+            base = 16;
+            str += 2;
+        } else if (str + 1 < end  &&
+                   str[0] >= '0' && str[0] <= '9' &&
+                   str[1] == 'r') {
+            base = str[0] - '0';
+            str += 2;
+        } else if (str + 2 < end  &&
+                   str[0] >= '0' && str[0] <= '9' &&
+                   str[1] >= '0' && str[1] <= '9' &&
+                   str[2] == 'r') {
+            base = 10 * (str[0] - '0') + (str[1] - '0');
+            if (base < 2 || base > 36) goto error;
+            str += 3;
+        }
+    }
+
+    /* If still base is 0, set to default (10) */
+    if (base == 0) {
+        base = 10;
     }
 
     /* Skip leading zeros */
@@ -326,7 +343,7 @@ int janet_scan_number(
     /* Read exponent */
     if (str < end && foundexp) {
         int eneg = 0;
-        int ee = 0;
+        int32_t ee = 0;
         seenadigit = 0;
         str++;
         if (str >= end) goto error;
@@ -341,10 +358,12 @@ int janet_scan_number(
             str++;
             seenadigit = 1;
         }
-        while (str < end && ee < (INT32_MAX / 40)) {
+        while (str < end) {
             int digit = digit_lookup[*str & 0x7F];
             if (*str > 127 || digit >= base) goto error;
-            ee = base * ee + digit;
+            if (ee < (INT32_MAX / 40)) {
+                ee = base * ee + digit;
+            }
             str++;
             seenadigit = 1;
         }
@@ -356,12 +375,19 @@ int janet_scan_number(
         goto error;
 
     *out = convert(neg, &mant, base, ex);
-    free(mant.digits);
+    janet_free(mant.digits);
     return 0;
 
 error:
-    free(mant.digits);
+    janet_free(mant.digits);
     return 1;
+}
+
+int janet_scan_number(
+    const uint8_t *str,
+    int32_t len,
+    double *out) {
+    return janet_scan_number_base(str, len, 0, out);
 }
 
 #ifdef JANET_INT_TYPES
@@ -435,12 +461,16 @@ int janet_scan_int64(const uint8_t *str, int32_t len, int64_t *out) {
     int neg;
     uint64_t bi;
     if (scan_uint64(str, len, &bi, &neg)) {
-        if (neg && bi <= 0x8000000000000000ULL) {
-            *out = -((int64_t) bi);
+        if (neg && bi <= ((UINT64_MAX / 2) + 1)) {
+            if (bi > INT64_MAX) {
+                *out = INT64_MIN;
+            } else {
+                *out = -((int64_t) bi);
+            }
             return 1;
         }
-        if (!neg && bi <= 0x7FFFFFFFFFFFFFFFULL) {
-            *out = bi;
+        if (!neg && bi <= INT64_MAX) {
+            *out = (int64_t) bi;
             return 1;
         }
     }

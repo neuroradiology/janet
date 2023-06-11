@@ -7,13 +7,13 @@ typedef struct {
 } num_array;
 
 static num_array *num_array_init(num_array *array, size_t size) {
-    array->data = (double *)calloc(size, sizeof(double));
+    array->data = (double *)janet_calloc(size, sizeof(double));
     array->size = size;
     return array;
 }
 
 static void num_array_deinit(num_array *array) {
-    free(array->data);
+    janet_free(array->data);
 }
 
 static int num_array_gc(void *p, size_t s) {
@@ -23,7 +23,7 @@ static int num_array_gc(void *p, size_t s) {
     return 0;
 }
 
-Janet num_array_get(void *p, Janet key);
+int num_array_get(void *p, Janet key, Janet *out);
 void num_array_put(void *p, Janet key, Janet value);
 
 static const JanetAbstractType num_array_type = {
@@ -31,7 +31,8 @@ static const JanetAbstractType num_array_type = {
     num_array_gc,
     NULL,
     num_array_get,
-    num_array_put
+    num_array_put,
+    JANET_ATEND_PUT
 };
 
 static Janet num_array_new(int32_t argc, Janet *argv) {
@@ -75,27 +76,33 @@ void num_array_put(void *p, Janet key, Janet value) {
     }
 }
 
+static Janet num_array_length(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    num_array *array = (num_array *)janet_getabstract(argv, 0, &num_array_type);
+    return janet_wrap_number(array->size);
+}
+
 static const JanetMethod methods[] = {
     {"scale", num_array_scale},
     {"sum", num_array_sum},
+    {"length", num_array_length},
     {NULL, NULL}
 };
 
-Janet num_array_get(void *p, Janet key) {
+int num_array_get(void *p, Janet key, Janet *out) {
     size_t index;
-    Janet value;
     num_array *array = (num_array *)p;
     if (janet_checktype(key, JANET_KEYWORD))
-        return janet_getmethod(janet_unwrap_keyword(key), methods);
+        return janet_getmethod(janet_unwrap_keyword(key), methods, out);
     if (!janet_checkint(key))
         janet_panic("expected integer key");
     index = (size_t)janet_unwrap_integer(key);
     if (index >= array->size) {
-        value = janet_wrap_nil();
+        return 0;
     } else {
-        value = janet_wrap_number(array->data[index]);
+        *out = janet_wrap_number(array->data[index]);
     }
-    return value;
+    return 1;
 }
 
 static const JanetReg cfuns[] = {
@@ -108,6 +115,11 @@ static const JanetReg cfuns[] = {
         "scale", num_array_scale,
         "(numarray/scale numarray factor)\n\n"
         "scale numarray by factor"
+    },
+    {
+        "sum", num_array_sum,
+        "(numarray/sum numarray)\n\n"
+        "sums numarray"
     },
     {NULL, NULL, NULL}
 };

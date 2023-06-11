@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,19 +21,54 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "state.h"
 #include "fiber.h"
 #endif
 
-void janet_panicv(Janet message) {
-    if (janet_vm_return_reg != NULL) {
-        *janet_vm_return_reg = message;
-        longjmp(*janet_vm_jmp_buf, 1);
+#ifndef JANET_SINGLE_THREADED
+#ifndef JANET_WINDOWS
+#include <pthread.h>
+#else
+#include <windows.h>
+#endif
+#endif
+
+JANET_NO_RETURN static void janet_top_level_signal(const char *msg) {
+#ifdef JANET_TOP_LEVEL_SIGNAL
+    JANET_TOP_LEVEL_SIGNAL(msg);
+#else
+    fputs(msg, stdout);
+# ifdef JANET_SINGLE_THREADED
+    exit(-1);
+# elif defined(JANET_WINDOWS)
+    ExitThread(-1);
+# else
+    pthread_exit(NULL);
+# endif
+#endif
+}
+
+void janet_signalv(JanetSignal sig, Janet message) {
+    if (janet_vm.return_reg != NULL) {
+        *janet_vm.return_reg = message;
+        if (NULL != janet_vm.fiber) {
+            janet_vm.fiber->flags |= JANET_FIBER_DID_LONGJUMP;
+        }
+#if defined(JANET_BSD) || defined(JANET_APPLE)
+        _longjmp(*janet_vm.signal_buf, sig);
+#else
+        longjmp(*janet_vm.signal_buf, sig);
+#endif
     } else {
-        fputs((const char *)janet_formatc("janet top level panic - %v\n", message), stdout);
-        exit(1);
+        const char *str = (const char *)janet_formatc("janet top level signal - %v\n", message);
+        janet_top_level_signal(str);
     }
+}
+
+void janet_panicv(Janet message) {
+    janet_signalv(JANET_SIGNAL_ERROR, message);
 }
 
 void janet_panicf(const char *format, ...) {
@@ -44,7 +79,7 @@ void janet_panicf(const char *format, ...) {
     while (format[len]) len++;
     janet_buffer_init(&buffer, len);
     va_start(args, format);
-    janet_formatb(&buffer, format, args);
+    janet_formatbv(&buffer, format, args);
     va_end(args);
     ret = janet_string(buffer.data, buffer.count);
     janet_buffer_deinit(&buffer);
@@ -86,20 +121,49 @@ type janet_get##name(const Janet *argv, int32_t n) { \
         janet_panic_type(x, n, JANET_TFLAG_##NAME); \
     } \
     return janet_unwrap_##name(x); \
-} \
+}
+
+#define DEFINE_OPT(name, NAME, type) \
 type janet_opt##name(const Janet *argv, int32_t argc, int32_t n, type dflt) { \
-    if (argc >= n) return dflt; \
+    if (n >= argc) return dflt; \
     if (janet_checktype(argv[n], JANET_NIL)) return dflt; \
     return janet_get##name(argv, n); \
 }
 
-Janet janet_getmethod(const uint8_t *method, const JanetMethod *methods) {
+#define DEFINE_OPTLEN(name, NAME, type) \
+type janet_opt##name(const Janet *argv, int32_t argc, int32_t n, int32_t dflt_len) { \
+    if (n >= argc || janet_checktype(argv[n], JANET_NIL)) {\
+        return janet_##name(dflt_len); \
+    }\
+    return janet_get##name(argv, n); \
+}
+
+int janet_getmethod(const uint8_t *method, const JanetMethod *methods, Janet *out) {
     while (methods->name) {
-        if (!janet_cstrcmp(method, methods->name))
-            return janet_wrap_cfunction(methods->cfun);
+        if (!janet_cstrcmp(method, methods->name)) {
+            *out = janet_wrap_cfunction(methods->cfun);
+            return 1;
+        }
         methods++;
     }
-    return janet_wrap_nil();
+    return 0;
+}
+
+Janet janet_nextmethod(const JanetMethod *methods, Janet key) {
+    if (!janet_checktype(key, JANET_NIL)) {
+        while (methods->name) {
+            if (janet_keyeq(key, methods->name)) {
+                methods++;
+                break;
+            }
+            methods++;
+        }
+    }
+    if (methods->name) {
+        return janet_ckeywordv(methods->name);
+    } else {
+        return janet_wrap_nil();
+    }
 }
 
 DEFINE_GETTER(number, NUMBER, double)
@@ -117,29 +181,120 @@ DEFINE_GETTER(cfunction, CFUNCTION, JanetCFunction)
 DEFINE_GETTER(boolean, BOOLEAN, int)
 DEFINE_GETTER(pointer, POINTER, void *)
 
+DEFINE_OPT(number, NUMBER, double)
+DEFINE_OPT(tuple, TUPLE, const Janet *)
+DEFINE_OPT(struct, STRUCT, const JanetKV *)
+DEFINE_OPT(string, STRING, const uint8_t *)
+DEFINE_OPT(keyword, KEYWORD, const uint8_t *)
+DEFINE_OPT(symbol, SYMBOL, const uint8_t *)
+DEFINE_OPT(fiber, FIBER, JanetFiber *)
+DEFINE_OPT(function, FUNCTION, JanetFunction *)
+DEFINE_OPT(cfunction, CFUNCTION, JanetCFunction)
+DEFINE_OPT(boolean, BOOLEAN, int)
+DEFINE_OPT(pointer, POINTER, void *)
+
+DEFINE_OPTLEN(buffer, BUFFER, JanetBuffer *)
+DEFINE_OPTLEN(table, TABLE, JanetTable *)
+DEFINE_OPTLEN(array, ARRAY, JanetArray *)
+
+const char *janet_optcstring(const Janet *argv, int32_t argc, int32_t n, const char *dflt) {
+    if (n >= argc || janet_checktype(argv[n], JANET_NIL)) {
+        return dflt;
+    }
+    return janet_getcstring(argv, n);
+}
+
+#undef DEFINE_GETTER
+#undef DEFINE_OPT
+#undef DEFINE_OPTLEN
+
 const char *janet_getcstring(const Janet *argv, int32_t n) {
-    const uint8_t *jstr = janet_getstring(argv, n);
-    const char *cstr = (const char *)jstr;
-    if (strlen(cstr) != (size_t) janet_string_length(jstr)) {
-        janet_panicf("string %v contains embedded 0s");
+    if (!janet_checktype(argv[n], JANET_STRING)) {
+        janet_panic_type(argv[n], n, JANET_TFLAG_STRING);
+    }
+    return janet_getcbytes(argv, n);
+}
+
+const char *janet_getcbytes(const Janet *argv, int32_t n) {
+    JanetByteView view = janet_getbytes(argv, n);
+    const char *cstr = (const char *)view.bytes;
+    if (strlen(cstr) != (size_t) view.len) {
+        janet_panic("bytes contain embedded 0s");
     }
     return cstr;
+}
+
+const char *janet_optcbytes(const Janet *argv, int32_t argc, int32_t n, const char *dflt) {
+    if (n >= argc || janet_checktype(argv[n], JANET_NIL)) {
+        return dflt;
+    }
+    return janet_getcbytes(argv, n);
+}
+
+int32_t janet_getnat(const Janet *argv, int32_t n) {
+    Janet x = argv[n];
+    if (!janet_checkint(x)) goto bad;
+    int32_t ret = janet_unwrap_integer(x);
+    if (ret < 0) goto bad;
+    return ret;
+bad:
+    janet_panicf("bad slot #%d, expected non-negative 32 bit signed integer, got %v", n, x);
+}
+
+JanetAbstract janet_checkabstract(Janet x, const JanetAbstractType *at) {
+    if (!janet_checktype(x, JANET_ABSTRACT)) return NULL;
+    JanetAbstract a = janet_unwrap_abstract(x);
+    if (janet_abstract_type(a) != at) return NULL;
+    return a;
+}
+
+static int janet_strlike_cmp(JanetType type, Janet x, const char *cstring) {
+    if (janet_type(x) != type) return 0;
+    return !janet_cstrcmp(janet_unwrap_string(x), cstring);
+}
+
+int janet_keyeq(Janet x, const char *cstring) {
+    return janet_strlike_cmp(JANET_KEYWORD, x, cstring);
+}
+
+int janet_streq(Janet x, const char *cstring) {
+    return janet_strlike_cmp(JANET_STRING, x, cstring);
+}
+
+int janet_symeq(Janet x, const char *cstring) {
+    return janet_strlike_cmp(JANET_SYMBOL, x, cstring);
 }
 
 int32_t janet_getinteger(const Janet *argv, int32_t n) {
     Janet x = argv[n];
     if (!janet_checkint(x)) {
-        janet_panicf("bad slot #%d, expected integer, got %v", n, x);
+        janet_panicf("bad slot #%d, expected 32 bit signed integer, got %v", n, x);
     }
     return janet_unwrap_integer(x);
 }
 
 int64_t janet_getinteger64(const Janet *argv, int32_t n) {
+#ifdef JANET_INT_TYPES
+    return janet_unwrap_s64(argv[n]);
+#else
     Janet x = argv[n];
     if (!janet_checkint64(x)) {
-        janet_panicf("bad slot #%d, expected 64 bit integer, got %v", n, x);
+        janet_panicf("bad slot #%d, expected 64 bit signed integer, got %v", n, x);
     }
     return (int64_t) janet_unwrap_number(x);
+#endif
+}
+
+uint64_t janet_getuinteger64(const Janet *argv, int32_t n) {
+#ifdef JANET_INT_TYPES
+    return janet_unwrap_u64(argv[n]);
+#else
+    Janet x = argv[n];
+    if (!janet_checkint64(x)) {
+        janet_panicf("bad slot #%d, expected 64 bit unsigned integer, got %v", n, x);
+    }
+    return (uint64_t) janet_unwrap_number(x);
+#endif
 }
 
 size_t janet_getsize(const Janet *argv, int32_t n) {
@@ -152,18 +307,20 @@ size_t janet_getsize(const Janet *argv, int32_t n) {
 
 int32_t janet_gethalfrange(const Janet *argv, int32_t n, int32_t length, const char *which) {
     int32_t raw = janet_getinteger(argv, n);
-    if (raw < 0) raw += length + 1;
-    if (raw < 0 || raw > length)
-        janet_panicf("%s index %d out of range [0,%d]", which, raw, length);
-    return raw;
+    int32_t not_raw = raw;
+    if (not_raw < 0) not_raw += length + 1;
+    if (not_raw < 0 || not_raw > length)
+        janet_panicf("%s index %d out of range [%d,%d]", which, raw, -length - 1, length);
+    return not_raw;
 }
 
 int32_t janet_getargindex(const Janet *argv, int32_t n, int32_t length, const char *which) {
     int32_t raw = janet_getinteger(argv, n);
-    if (raw < 0) raw += length;
-    if (raw < 0 || raw > length)
-        janet_panicf("%s index %d out of range [0,%d)", which, raw, length);
-    return raw;
+    int32_t not_raw = raw;
+    if (not_raw < 0) not_raw += length;
+    if (not_raw < 0 || not_raw > length)
+        janet_panicf("%s index %d out of range [%d,%d)", which, raw, -length, length);
+    return not_raw;
 }
 
 JanetView janet_getindexed(const Janet *argv, int32_t n) {
@@ -231,20 +388,27 @@ JanetRange janet_getslice(int32_t argc, const Janet *argv) {
 }
 
 Janet janet_dyn(const char *name) {
-    if (!janet_vm_fiber) return janet_wrap_nil();
-    if (janet_vm_fiber->env) {
-        return janet_table_get(janet_vm_fiber->env, janet_ckeywordv(name));
+    if (!janet_vm.fiber) {
+        if (!janet_vm.top_dyns) return janet_wrap_nil();
+        return janet_table_get(janet_vm.top_dyns, janet_ckeywordv(name));
+    }
+    if (janet_vm.fiber->env) {
+        return janet_table_get(janet_vm.fiber->env, janet_ckeywordv(name));
     } else {
         return janet_wrap_nil();
     }
 }
 
 void janet_setdyn(const char *name, Janet value) {
-    if (!janet_vm_fiber) return;
-    if (!janet_vm_fiber->env) {
-        janet_vm_fiber->env = janet_table(1);
+    if (!janet_vm.fiber) {
+        if (!janet_vm.top_dyns) janet_vm.top_dyns = janet_table(10);
+        janet_table_put(janet_vm.top_dyns, janet_ckeywordv(name), value);
+    } else {
+        if (!janet_vm.fiber->env) {
+            janet_vm.fiber->env = janet_table(1);
+        }
+        janet_table_put(janet_vm.fiber->env, janet_ckeywordv(name), value);
     }
-    janet_table_put(janet_vm_fiber->env, janet_ckeywordv(name), value);
 }
 
 uint64_t janet_getflags(const Janet *argv, int32_t n, const char *flags) {
@@ -267,6 +431,12 @@ uint64_t janet_getflags(const Janet *argv, int32_t n, const char *flags) {
         ;
     }
     return ret;
+}
+
+int32_t janet_optnat(const Janet *argv, int32_t argc, int32_t n, int32_t dflt) {
+    if (argc <= n) return dflt;
+    if (janet_checktype(argv[n], JANET_NIL)) return dflt;
+    return janet_getnat(argv, n);
 }
 
 int32_t janet_optinteger(const Janet *argv, int32_t argc, int32_t n, int32_t dflt) {

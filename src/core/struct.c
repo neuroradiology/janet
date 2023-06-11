@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
@@ -33,18 +34,19 @@ JanetKV *janet_struct_begin(int32_t count) {
     int32_t capacity = janet_tablen(2 * count);
     if (capacity < 0) capacity = janet_tablen(count + 1);
 
-    size_t size = sizeof(JanetStructHead) + capacity * sizeof(JanetKV);
+    size_t size = sizeof(JanetStructHead) + (size_t) capacity * sizeof(JanetKV);
     JanetStructHead *head = janet_gcalloc(JANET_MEMORY_STRUCT, size);
     head->length = count;
     head->capacity = capacity;
     head->hash = 0;
+    head->proto = NULL;
 
     JanetKV *st = (JanetKV *)(head->data);
     janet_memempty(st, capacity);
     return st;
 }
 
-/* Find an item in a struct. Should be similar to janet_dict_find, but
+/* Find an item in a struct without looking for prototypes. Should be similar to janet_dict_find, but
  * specialized to structs (slightly more compact). */
 const JanetKV *janet_struct_find(const JanetKV *st, Janet key) {
     int32_t cap = janet_struct_capacity(st);
@@ -67,7 +69,7 @@ const JanetKV *janet_struct_find(const JanetKV *st, Janet key) {
  * preforms an in-place insertion sort. This ensures the internal structure of the
  * hash map is independent of insertion order.
  */
-void janet_struct_put(JanetKV *st, Janet key, Janet value) {
+void janet_struct_put_ext(JanetKV *st, Janet key, Janet value, int replace) {
     int32_t cap = janet_struct_capacity(st);
     int32_t hash = janet_hash(key);
     int32_t index = janet_maphash(cap, hash);
@@ -122,10 +124,17 @@ void janet_struct_put(JanetKV *st, Janet key, Janet value) {
                 dist = otherdist;
                 hash = otherhash;
             } else if (status == 0) {
-                /* A key was added to the struct more than once */
+                if (replace) {
+                    /* A key was added to the struct more than once - replace old value */
+                    kv->value = value;
+                }
                 return;
             }
         }
+}
+
+void janet_struct_put(JanetKV *st, Janet key, Janet value) {
+    janet_struct_put_ext(st, key, value, 1);
 }
 
 /* Finish building a struct */
@@ -141,16 +150,43 @@ const JanetKV *janet_struct_end(JanetKV *st) {
                 janet_struct_put(newst, kv->key, kv->value);
             }
         }
+        janet_struct_proto(newst) = janet_struct_proto(st);
         st = newst;
     }
     janet_struct_hash(st) = janet_kv_calchash(st, janet_struct_capacity(st));
+    if (janet_struct_proto(st)) {
+        janet_struct_hash(st) += 2654435761u * janet_struct_hash(janet_struct_proto(st));
+    }
     return (const JanetKV *)st;
+}
+
+/* Get an item from a struct without looking into prototypes. */
+Janet janet_struct_rawget(const JanetKV *st, Janet key) {
+    const JanetKV *kv = janet_struct_find(st, key);
+    return kv ? kv->value : janet_wrap_nil();
 }
 
 /* Get an item from a struct */
 Janet janet_struct_get(const JanetKV *st, Janet key) {
-    const JanetKV *kv = janet_struct_find(st, key);
-    return kv ? kv->value : janet_wrap_nil();
+    for (int i = JANET_MAX_PROTO_DEPTH; st && i; --i, st = janet_struct_proto(st)) {
+        const JanetKV *kv = janet_struct_find(st, key);
+        if (NULL != kv && !janet_checktype(kv->key, JANET_NIL)) {
+            return kv->value;
+        }
+    }
+    return janet_wrap_nil();
+}
+
+/* Get an item from a struct, and record which prototype the item came from. */
+Janet janet_struct_get_ex(const JanetKV *st, Janet key, JanetStruct *which) {
+    for (int i = JANET_MAX_PROTO_DEPTH; st && i; --i, st = janet_struct_proto(st)) {
+        const JanetKV *kv = janet_struct_find(st, key);
+        if (NULL != kv && !janet_checktype(kv->key, JANET_NIL)) {
+            *which = st;
+            return kv->value;
+        }
+    }
+    return janet_wrap_nil();
 }
 
 /* Convert struct to table */
@@ -166,50 +202,106 @@ JanetTable *janet_struct_to_table(const JanetKV *st) {
     return table;
 }
 
-/* Check if two structs are equal */
-int janet_struct_equal(const JanetKV *lhs, const JanetKV *rhs) {
-    int32_t index;
-    int32_t llen = janet_struct_capacity(lhs);
-    int32_t rlen = janet_struct_capacity(rhs);
-    int32_t lhash = janet_struct_hash(lhs);
-    int32_t rhash = janet_struct_hash(rhs);
-    if (llen != rlen)
-        return 0;
-    if (lhash != rhash)
-        return 0;
-    for (index = 0; index < llen; index++) {
-        const JanetKV *l = lhs + index;
-        const JanetKV *r = rhs + index;
-        if (!janet_equals(l->key, r->key))
-            return 0;
-        if (!janet_equals(l->value, r->value))
-            return 0;
+/* C Functions */
+
+JANET_CORE_FN(cfun_struct_with_proto,
+              "(struct/with-proto proto & kvs)",
+              "Create a structure, as with the usual struct constructor but set the "
+              "struct prototype as well.") {
+    janet_arity(argc, 1, -1);
+    JanetStruct proto = janet_optstruct(argv, argc, 0, NULL);
+    if (!(argc & 1))
+        janet_panic("expected odd number of arguments");
+    JanetKV *st = janet_struct_begin(argc / 2);
+    for (int32_t i = 1; i < argc; i += 2) {
+        janet_struct_put(st, argv[i], argv[i + 1]);
     }
-    return 1;
+    janet_struct_proto(st) = proto;
+    return janet_wrap_struct(janet_struct_end(st));
 }
 
-/* Compare structs */
-int janet_struct_compare(const JanetKV *lhs, const JanetKV *rhs) {
-    int32_t i;
-    int32_t lhash = janet_struct_hash(lhs);
-    int32_t rhash = janet_struct_hash(rhs);
-    int32_t llen = janet_struct_capacity(lhs);
-    int32_t rlen = janet_struct_capacity(rhs);
-    if (llen < rlen)
-        return -1;
-    if (llen > rlen)
-        return 1;
-    if (lhash < rhash)
-        return -1;
-    if (lhash > rhash)
-        return 1;
-    for (i = 0; i < llen; ++i) {
-        const JanetKV *l = lhs + i;
-        const JanetKV *r = rhs + i;
-        int comp = janet_compare(l->key, r->key);
-        if (comp != 0) return comp;
-        comp = janet_compare(l->value, r->value);
-        if (comp != 0) return comp;
+JANET_CORE_FN(cfun_struct_getproto,
+              "(struct/getproto st)",
+              "Return the prototype of a struct, or nil if it doesn't have one.") {
+    janet_fixarity(argc, 1);
+    JanetStruct st = janet_getstruct(argv, 0);
+    return janet_struct_proto(st)
+           ? janet_wrap_struct(janet_struct_proto(st))
+           : janet_wrap_nil();
+}
+
+JANET_CORE_FN(cfun_struct_flatten,
+              "(struct/proto-flatten st)",
+              "Convert a struct with prototypes to a struct with no prototypes by merging "
+              "all key value pairs from recursive prototypes into one new struct.") {
+    janet_fixarity(argc, 1);
+    JanetStruct st = janet_getstruct(argv, 0);
+
+    /* get an upper bounds on the number of items in the final struct */
+    int64_t pair_count = 0;
+    JanetStruct cursor = st;
+    while (cursor) {
+        pair_count += janet_struct_length(cursor);
+        cursor = janet_struct_proto(cursor);
     }
-    return 0;
+
+    if (pair_count > INT32_MAX) {
+        janet_panic("struct too large");
+    }
+
+    JanetKV *accum = janet_struct_begin((int32_t) pair_count);
+    cursor = st;
+    while (cursor) {
+        for (int32_t i = 0; i < janet_struct_capacity(cursor); i++) {
+            const JanetKV *kv = cursor + i;
+            if (!janet_checktype(kv->key, JANET_NIL)) {
+                janet_struct_put_ext(accum, kv->key, kv->value, 0);
+            }
+        }
+        cursor = janet_struct_proto(cursor);
+    }
+    return janet_wrap_struct(janet_struct_end(accum));
+}
+
+JANET_CORE_FN(cfun_struct_to_table,
+              "(struct/to-table st &opt recursive)",
+              "Convert a struct to a table. If recursive is true, also convert the "
+              "table's prototypes into the new struct's prototypes as well.") {
+    janet_arity(argc, 1, 2);
+    JanetStruct st = janet_getstruct(argv, 0);
+    int recursive = argc > 1 && janet_truthy(argv[1]);
+    JanetTable *tab = NULL;
+    JanetStruct cursor = st;
+    JanetTable *tab_cursor = tab;
+    do {
+        if (tab) {
+            tab_cursor->proto = janet_table(janet_struct_length(cursor));
+            tab_cursor = tab_cursor->proto;
+        } else {
+            tab = janet_table(janet_struct_length(cursor));
+            tab_cursor = tab;
+        }
+        /* TODO - implement as memcpy since struct memory should be compatible
+         * with table memory */
+        for (int32_t i = 0; i < janet_struct_capacity(cursor); i++) {
+            const JanetKV *kv = cursor + i;
+            if (!janet_checktype(kv->key, JANET_NIL)) {
+                janet_table_put(tab_cursor, kv->key, kv->value);
+            }
+        }
+        cursor = janet_struct_proto(cursor);
+    } while (recursive && cursor);
+    return janet_wrap_table(tab);
+}
+
+/* Load the struct module */
+void janet_lib_struct(JanetTable *env) {
+    JanetRegExt struct_cfuns[] = {
+        JANET_CORE_REG("struct/with-proto", cfun_struct_with_proto),
+        JANET_CORE_REG("struct/getproto", cfun_struct_getproto),
+        JANET_CORE_REG("struct/proto-flatten", cfun_struct_flatten),
+        JANET_CORE_REG("struct/to-table", cfun_struct_to_table),
+        JANET_REG_END
+    };
+    janet_core_cfuns_ext(env, NULL, struct_cfuns);
 }

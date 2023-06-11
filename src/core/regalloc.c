@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,10 +21,13 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "regalloc.h"
 #include "util.h"
 #endif
+
+/* The JanetRegisterAllocator is really just a bitset. */
 
 void janetc_regalloc_init(JanetcRegisterAllocator *ra) {
     ra->chunks = NULL;
@@ -35,7 +38,7 @@ void janetc_regalloc_init(JanetcRegisterAllocator *ra) {
 }
 
 void janetc_regalloc_deinit(JanetcRegisterAllocator *ra) {
-    free(ra->chunks);
+    janet_free(ra->chunks);
 }
 
 /* Fallbacks for when ctz not available */
@@ -66,10 +69,10 @@ void janetc_regalloc_clone(JanetcRegisterAllocator *dest, JanetcRegisterAllocato
     dest->count = src->count;
     dest->capacity = src->capacity;
     dest->max = src->max;
-    size = sizeof(uint32_t) * dest->capacity;
+    size = sizeof(uint32_t) * (size_t) dest->capacity;
     dest->regtemps = 0;
     if (size) {
-        dest->chunks = malloc(size);
+        dest->chunks = janet_malloc(size);
         if (!dest->chunks) {
             JANET_OUT_OF_MEMORY;
         }
@@ -86,7 +89,7 @@ static void pushchunk(JanetcRegisterAllocator *ra) {
     int32_t newcount = ra->count + 1;
     if (newcount > ra->capacity) {
         int32_t newcapacity = newcount * 2;
-        ra->chunks = realloc(ra->chunks, newcapacity * sizeof(uint32_t));
+        ra->chunks = janet_realloc(ra->chunks, (size_t) newcapacity * sizeof(uint32_t));
         if (!ra->chunks) {
             JANET_OUT_OF_MEMORY;
         }
@@ -138,13 +141,21 @@ void janetc_regalloc_free(JanetcRegisterAllocator *ra, int32_t reg) {
     ra->chunks[chunk] &= ~ithbit(bit);
 }
 
+/* Check if a register is set. */
+int janetc_regalloc_check(JanetcRegisterAllocator *ra, int32_t reg) {
+    int32_t chunk = reg >> 5;
+    int32_t bit = reg & 0x1F;
+    while (chunk >= ra->count) pushchunk(ra);
+    return !!(ra->chunks[chunk] & ithbit(bit));
+}
+
 /* Get a register that will fit in 8 bits (< 256). Do not call this
  * twice with the same value of nth without calling janetc_regalloc_free
  * on the returned register before. */
 int32_t janetc_regalloc_temp(JanetcRegisterAllocator *ra, JanetcRegisterTemp nth) {
     int32_t oldmax = ra->max;
     if (ra->regtemps & (1 << nth)) {
-        janet_exit("regtemp already allocated");
+        JANET_EXIT("regtemp already allocated");
     }
     ra->regtemps |= 1 << nth;
     int32_t reg = janetc_regalloc_1(ra);

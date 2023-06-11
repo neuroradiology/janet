@@ -13,6 +13,12 @@ janet
 janet-*.tar.gz
 dist
 
+# jpm lockfile
+lockfile.janet
+
+# Kakoune (fzf via fd)
+.fdignore
+
 # VSCode
 .vscode
 
@@ -26,6 +32,11 @@ dist
 # Local directory for testing
 local
 
+# Common test files I use.
+temp.janet
+temp*.janet
+scratch.janet
+
 # Emscripten
 *.bc
 janet.js
@@ -37,6 +48,7 @@ janet.wasm
 
 # Generate test files
 *.out
+.orig
 
 # Tools
 xxd
@@ -44,6 +56,7 @@ xxd.exe
 
 # VSCode
 .vs
+.clangd
 
 # Swap files
 *.swp
@@ -54,6 +67,13 @@ tags
 # Valgrind files
 vgcore.*
 *.out.*
+
+# WiX artifacts
+*.msi
+*.wixpdb
+
+# Makefile config
+/config.mk
 
 # Created by https://www.gitignore.io/api/c
 
@@ -125,3 +145,6 @@ compile_commands.json
 CTestTestfile.cmake
 
 # End of https://www.gitignore.io/api/cmake
+
+# Astyle
+*.orig

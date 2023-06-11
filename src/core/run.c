@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "state.h"
 #endif
@@ -49,38 +50,44 @@ int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char
                 JanetFiber *fiber = janet_fiber(f, 64, 0, NULL);
                 fiber->env = env;
                 JanetSignal status = janet_continue(fiber, janet_wrap_nil(), &ret);
-                if (status != JANET_SIGNAL_OK) {
-                    janet_stacktrace(fiber, ret);
+                if (status != JANET_SIGNAL_OK && status != JANET_SIGNAL_EVENT) {
+                    janet_stacktrace_ext(fiber, ret, "");
                     errflags |= 0x01;
                     done = 1;
                 }
             } else {
-                janet_eprintf("compile error in %s: %s\n", sourcePath,
-                              (const char *)cres.error);
+                ret = janet_wrap_string(cres.error);
+                if (cres.macrofiber) {
+                    janet_eprintf("compile error in %s: ", sourcePath);
+                    janet_stacktrace_ext(cres.macrofiber, ret, "");
+                } else {
+                    janet_eprintf("compile error in %s: %s\n", sourcePath,
+                                  (const char *)cres.error);
+                }
                 errflags |= 0x02;
                 done = 1;
             }
         }
+
+        if (done) break;
 
         /* Dispatch based on parse state */
         switch (janet_parser_status(&parser)) {
             case JANET_PARSE_DEAD:
                 done = 1;
                 break;
-            case JANET_PARSE_ERROR:
+            case JANET_PARSE_ERROR: {
+                const char *e = janet_parser_error(&parser);
                 errflags |= 0x04;
-                janet_eprintf("parse error in %s: %s\n",
-                              sourcePath, janet_parser_error(&parser));
+                ret = janet_cstringv(e);
+                int32_t line = (int32_t) parser.line;
+                int32_t col = (int32_t) parser.column;
+                janet_eprintf("%s:%d:%d: parse error: %s\n", sourcePath, line, col, e);
                 done = 1;
                 break;
-            case JANET_PARSE_PENDING:
-                if (index == len) {
-                    janet_parser_eof(&parser);
-                } else {
-                    janet_parser_consume(&parser, bytes[index++]);
-                }
-                break;
+            }
             case JANET_PARSE_ROOT:
+            case JANET_PARSE_PENDING:
                 if (index >= len) {
                     janet_parser_eof(&parser);
                 } else {
@@ -94,6 +101,14 @@ int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char
     /* Clean up and return errors */
     janet_parser_deinit(&parser);
     if (where) janet_gcunroot(janet_wrap_string(where));
+#ifdef JANET_EV
+    /* Enter the event loop if we are not already in it */
+    if (janet_vm.stackn == 0) {
+        janet_gcroot(ret);
+        janet_loop();
+        janet_gcunroot(ret);
+    }
+#endif
     if (out) *out = ret;
     return errflags;
 }
@@ -104,3 +119,19 @@ int janet_dostring(JanetTable *env, const char *str, const char *sourcePath, Jan
     return janet_dobytes(env, (const uint8_t *)str, len, sourcePath, out);
 }
 
+/* Run a fiber to completion (use event loop if enabled). Return the status. */
+int janet_loop_fiber(JanetFiber *fiber) {
+    int status;
+#ifdef JANET_EV
+    janet_schedule(fiber, janet_wrap_nil());
+    janet_loop();
+    status = janet_fiber_status(fiber);
+#else
+    Janet out;
+    status = janet_continue(fiber, janet_wrap_nil(), &out);
+    if (status != JANET_SIGNAL_OK && status != JANET_SIGNAL_EVENT) {
+        janet_stacktrace_ext(fiber, out, "");
+    }
+#endif
+    return status;
+}

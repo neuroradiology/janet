@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include "gc.h"
 #include "util.h"
@@ -34,8 +35,8 @@ JanetArray *janet_array(int32_t capacity) {
     JanetArray *array = janet_gcalloc(JANET_MEMORY_ARRAY, sizeof(JanetArray));
     Janet *data = NULL;
     if (capacity > 0) {
-        janet_vm_next_collection += capacity * sizeof(Janet);
-        data = (Janet *) malloc(sizeof(Janet) * capacity);
+        janet_vm.next_collection += capacity * sizeof(Janet);
+        data = (Janet *) janet_malloc(sizeof(Janet) * (size_t) capacity);
         if (NULL == data) {
             JANET_OUT_OF_MEMORY;
         }
@@ -51,11 +52,11 @@ JanetArray *janet_array_n(const Janet *elements, int32_t n) {
     JanetArray *array = janet_gcalloc(JANET_MEMORY_ARRAY, sizeof(JanetArray));
     array->capacity = n;
     array->count = n;
-    array->data = malloc(sizeof(Janet) * n);
+    array->data = janet_malloc(sizeof(Janet) * (size_t) n);
     if (!array->data) {
         JANET_OUT_OF_MEMORY;
     }
-    memcpy(array->data, elements, sizeof(Janet) * n);
+    safe_memcpy(array->data, elements, sizeof(Janet) * n);
     return array;
 }
 
@@ -67,11 +68,11 @@ void janet_array_ensure(JanetArray *array, int32_t capacity, int32_t growth) {
     int64_t new_capacity = ((int64_t) capacity) * growth;
     if (new_capacity > INT32_MAX) new_capacity = INT32_MAX;
     capacity = (int32_t) new_capacity;
-    newData = realloc(old, capacity * sizeof(Janet));
+    newData = janet_realloc(old, capacity * sizeof(Janet));
     if (NULL == newData) {
         JANET_OUT_OF_MEMORY;
     }
-    janet_vm_next_collection += (capacity - array->capacity) * sizeof(Janet);
+    janet_vm.next_collection += (capacity - array->capacity) * sizeof(Janet);
     array->data = newData;
     array->capacity = capacity;
 }
@@ -92,6 +93,9 @@ void janet_array_setcount(JanetArray *array, int32_t count) {
 
 /* Push a value to the top of the array */
 void janet_array_push(JanetArray *array, Janet x) {
+    if (array->count == INT32_MAX) {
+        janet_panic("array overflow");
+    }
     int32_t newcount = array->count + 1;
     janet_array_ensure(array, newcount, 2);
     array->data[array->count] = x;
@@ -118,36 +122,81 @@ Janet janet_array_peek(JanetArray *array) {
 
 /* C Functions */
 
-static Janet cfun_array_new(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_new,
+              "(array/new capacity)",
+              "Creates a new empty array with a pre-allocated capacity. The same as "
+              "`(array)` but can be more efficient if the maximum size of an array is known.") {
     janet_fixarity(argc, 1);
     int32_t cap = janet_getinteger(argv, 0);
     JanetArray *array = janet_array(cap);
     return janet_wrap_array(array);
 }
 
-static Janet cfun_array_pop(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_new_filled,
+              "(array/new-filled count &opt value)",
+              "Creates a new array of `count` elements, all set to `value`, which defaults to nil. Returns the new array.") {
+    janet_arity(argc, 1, 2);
+    int32_t count = janet_getnat(argv, 0);
+    Janet x = (argc == 2) ? argv[1] : janet_wrap_nil();
+    JanetArray *array = janet_array(count);
+    for (int32_t i = 0; i < count; i++) {
+        array->data[i] = x;
+    }
+    array->count = count;
+    return janet_wrap_array(array);
+}
+
+JANET_CORE_FN(cfun_array_fill,
+              "(array/fill arr &opt value)",
+              "Replace all elements of an array with `value` (defaulting to nil) without changing the length of the array. "
+              "Returns the modified array.") {
+    janet_arity(argc, 1, 2);
+    JanetArray *array = janet_getarray(argv, 0);
+    Janet x = (argc == 2) ? argv[1] : janet_wrap_nil();
+    for (int32_t i = 0; i < array->count; i++) {
+        array->data[i] = x;
+    }
+    return argv[0];
+}
+
+JANET_CORE_FN(cfun_array_pop,
+              "(array/pop arr)",
+              "Remove the last element of the array and return it. If the array is empty, will return nil. Modifies "
+              "the input array.") {
     janet_fixarity(argc, 1);
     JanetArray *array = janet_getarray(argv, 0);
     return janet_array_pop(array);
 }
 
-static Janet cfun_array_peek(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_peek,
+              "(array/peek arr)",
+              "Returns the last element of the array. Does not modify the array.") {
     janet_fixarity(argc, 1);
     JanetArray *array = janet_getarray(argv, 0);
     return janet_array_peek(array);
 }
 
-static Janet cfun_array_push(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_push,
+              "(array/push arr x)",
+              "Insert an element in the end of an array. Modifies the input array and returns it.") {
     janet_arity(argc, 1, -1);
     JanetArray *array = janet_getarray(argv, 0);
+    if (INT32_MAX - argc + 1 <= array->count) {
+        janet_panic("array overflow");
+    }
     int32_t newcount = array->count - 1 + argc;
     janet_array_ensure(array, newcount, 2);
-    if (argc > 1) memcpy(array->data + array->count, argv + 1, (argc - 1) * sizeof(Janet));
+    if (argc > 1) memcpy(array->data + array->count, argv + 1, (size_t)(argc - 1) * sizeof(Janet));
     array->count = newcount;
     return argv[0];
 }
 
-static Janet cfun_array_ensure(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_ensure,
+              "(array/ensure arr capacity growth)",
+              "Ensures that the memory backing the array is large enough for `capacity` "
+              "items at the given rate of growth. `capacity` and `growth` must be integers. "
+              "If the backing capacity is already enough, then this function does nothing. "
+              "Otherwise, the backing memory will be reallocated so that there is enough space.") {
     janet_fixarity(argc, 3);
     JanetArray *array = janet_getarray(argv, 0);
     int32_t newcount = janet_getinteger(argv, 1);
@@ -157,7 +206,13 @@ static Janet cfun_array_ensure(int32_t argc, Janet *argv) {
     return argv[0];
 }
 
-static Janet cfun_array_slice(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_slice,
+              "(array/slice arrtup &opt start end)",
+              "Takes a slice of array or tuple from `start` to `end`. The range is half open, "
+              "[start, end). Indexes can also be negative, indicating indexing from the "
+              "end of the array. By default, `start` is 0 and `end` is the length of the array. "
+              "Note that index -1 is synonymous with index `(length arrtup)` to allow a full "
+              "negative slice range. Returns a new array.") {
     JanetView view = janet_getindexed(argv, 0);
     JanetRange range = janet_getslice(argc, argv);
     JanetArray *array = janet_array(range.end - range.start);
@@ -167,7 +222,12 @@ static Janet cfun_array_slice(int32_t argc, Janet *argv) {
     return janet_wrap_array(array);
 }
 
-static Janet cfun_array_concat(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_concat,
+              "(array/concat arr & parts)",
+              "Concatenates a variable number of arrays (and tuples) into the first argument, "
+              "which must be an array. If any of the parts are arrays or tuples, their elements will "
+              "be inserted into the array. Otherwise, each part in `parts` will be appended to `arr` in order. "
+              "Return the modified array `arr`.") {
     int32_t i;
     janet_arity(argc, 1, -1);
     JanetArray *array = janet_getarray(argv, 0);
@@ -181,6 +241,11 @@ static Janet cfun_array_concat(int32_t argc, Janet *argv) {
                 int32_t j, len = 0;
                 const Janet *vals = NULL;
                 janet_indexed_view(argv[i], &vals, &len);
+                if (array->data == vals) {
+                    int32_t newcount = array->count + len;
+                    janet_array_ensure(array, newcount, 2);
+                    janet_indexed_view(argv[i], &vals, &len);
+                }
                 for (j = 0; j < len; j++)
                     janet_array_push(array, vals[j]);
             }
@@ -190,7 +255,12 @@ static Janet cfun_array_concat(int32_t argc, Janet *argv) {
     return janet_wrap_array(array);
 }
 
-static Janet cfun_array_insert(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_insert,
+              "(array/insert arr at & xs)",
+              "Insert all `xs` into array `arr` at index `at`. `at` should be an integer between "
+              "0 and the length of the array. A negative value for `at` will index backwards from "
+              "the end of the array, such that inserting at -1 appends to the array. "
+              "Returns the array.") {
     size_t chunksize, restsize;
     janet_arity(argc, 2, -1);
     JanetArray *array = janet_getarray(argv, 0);
@@ -202,16 +272,26 @@ static Janet cfun_array_insert(int32_t argc, Janet *argv) {
         janet_panicf("insertion index %d out of range [0,%d]", at, array->count);
     chunksize = (argc - 2) * sizeof(Janet);
     restsize = (array->count - at) * sizeof(Janet);
+    if (INT32_MAX - (argc - 2) < array->count) {
+        janet_panic("array overflow");
+    }
     janet_array_ensure(array, array->count + argc - 2, 2);
-    memmove(array->data + at + argc - 2,
-            array->data + at,
-            restsize);
-    memcpy(array->data + at, argv + 2, chunksize);
+    if (restsize) {
+        memmove(array->data + at + argc - 2,
+                array->data + at,
+                restsize);
+    }
+    safe_memcpy(array->data + at, argv + 2, chunksize);
     array->count += (argc - 2);
     return argv[0];
 }
 
-static Janet cfun_array_remove(int32_t argc, Janet *argv) {
+JANET_CORE_FN(cfun_array_remove,
+              "(array/remove arr at &opt n)",
+              "Remove up to `n` elements starting at index `at` in array `arr`. `at` can index from "
+              "the end of the array with a negative index, and `n` must be a non-negative integer. "
+              "By default, `n` is 1. "
+              "Returns the array.") {
     janet_arity(argc, 2, 3);
     JanetArray *array = janet_getarray(argv, 0);
     int32_t at = janet_getinteger(argv, 1);
@@ -236,73 +316,55 @@ static Janet cfun_array_remove(int32_t argc, Janet *argv) {
     return argv[0];
 }
 
-static const JanetReg array_cfuns[] = {
-    {
-        "array/new", cfun_array_new,
-        JDOC("(array/new capacity)\n\n"
-             "Creates a new empty array with a pre-allocated capacity. The same as "
-             "(array) but can be more efficient if the maximum size of an array is known.")
-    },
-    {
-        "array/pop", cfun_array_pop,
-        JDOC("(array/pop arr)\n\n"
-             "Remove the last element of the array and return it. If the array is empty, will return nil. Modifies "
-             "the input array.")
-    },
-    {
-        "array/peek", cfun_array_peek,
-        JDOC("(array/peek arr)\n\n"
-             "Returns the last element of the array. Does not modify the array.")
-    },
-    {
-        "array/push", cfun_array_push,
-        JDOC("(array/push arr x)\n\n"
-             "Insert an element in the end of an array. Modifies the input array and returns it.")
-    },
-    {
-        "array/ensure", cfun_array_ensure,
-        JDOC("(array/ensure arr capacity)\n\n"
-             "Ensures that the memory backing the array is large enough for capacity "
-             "items. Capacity must be an integer. If the backing capacity is already enough, "
-             "then this function does nothing. Otherwise, the backing memory will be reallocated "
-             "so that there is enough space.")
-    },
-    {
-        "array/slice", cfun_array_slice,
-        JDOC("(array/slice arrtup &opt start end)\n\n"
-             "Takes a slice of array or tuple from start to end. The range is half open, "
-             "[start, end). Indexes can also be negative, indicating indexing from the end of the "
-             "end of the array. By default, start is 0 and end is the length of the array. "
-             "Returns a new array.")
-    },
-    {
-        "array/concat", cfun_array_concat,
-        JDOC("(array/concat arr & parts)\n\n"
-             "Concatenates a variadic number of arrays (and tuples) into the first argument "
-             "which must an array. If any of the parts are arrays or tuples, their elements will "
-             "be inserted into the array. Otherwise, each part in parts will be appended to arr in order. "
-             "Return the modified array arr.")
-    },
-    {
-        "array/insert", cfun_array_insert,
-        JDOC("(array/insert arr at & xs)\n\n"
-             "Insert all of xs into array arr at index at. at should be an integer "
-             "0 and the length of the array. A negative value for at will index from "
-             "the end of the array, such that inserting at -1 appends to the array. "
-             "Returns the array.")
-    },
-    {
-        "array/remove", cfun_array_remove,
-        JDOC("(array/remove arr at &opt n)\n\n"
-             "Remove up to n elements starting at index at in array arr. at can index from "
-             "the end of the array with a negative index, and n must be a non-negative integer. "
-             "By default, n is 1. "
-             "Returns the array.")
-    },
-    {NULL, NULL, NULL}
-};
+JANET_CORE_FN(cfun_array_trim,
+              "(array/trim arr)",
+              "Set the backing capacity of an array to its current length. Returns the modified array.") {
+    janet_fixarity(argc, 1);
+    JanetArray *array = janet_getarray(argv, 0);
+    if (array->count) {
+        if (array->count < array->capacity) {
+            Janet *newData = janet_realloc(array->data, array->count * sizeof(Janet));
+            if (NULL == newData) {
+                JANET_OUT_OF_MEMORY;
+            }
+            array->data = newData;
+            array->capacity = array->count;
+        }
+    } else {
+        array->capacity = 0;
+        janet_free(array->data);
+        array->data = NULL;
+    }
+    return argv[0];
+}
+
+JANET_CORE_FN(cfun_array_clear,
+              "(array/clear arr)",
+              "Empties an array, setting it's count to 0 but does not free the backing capacity. "
+              "Returns the modified array.") {
+    janet_fixarity(argc, 1);
+    JanetArray *array = janet_getarray(argv, 0);
+    array->count = 0;
+    return argv[0];
+}
 
 /* Load the array module */
 void janet_lib_array(JanetTable *env) {
-    janet_core_cfuns(env, NULL, array_cfuns);
+    JanetRegExt array_cfuns[] = {
+        JANET_CORE_REG("array/new", cfun_array_new),
+        JANET_CORE_REG("array/new-filled", cfun_array_new_filled),
+        JANET_CORE_REG("array/fill", cfun_array_fill),
+        JANET_CORE_REG("array/pop", cfun_array_pop),
+        JANET_CORE_REG("array/peek", cfun_array_peek),
+        JANET_CORE_REG("array/push", cfun_array_push),
+        JANET_CORE_REG("array/ensure", cfun_array_ensure),
+        JANET_CORE_REG("array/slice", cfun_array_slice),
+        JANET_CORE_REG("array/concat", cfun_array_concat),
+        JANET_CORE_REG("array/insert", cfun_array_insert),
+        JANET_CORE_REG("array/remove", cfun_array_remove),
+        JANET_CORE_REG("array/trim", cfun_array_trim),
+        JANET_CORE_REG("array/clear", cfun_array_clear),
+        JANET_REG_END
+    };
+    janet_core_cfuns_ext(env, NULL, array_cfuns);
 }

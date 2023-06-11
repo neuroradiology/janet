@@ -17,6 +17,7 @@
       "quote"
       "quasiquote"
       "unquote"
+      "upscope"
       "splice"]
     (all-bindings)))
 (def allsyms (dyn :allsyms))
@@ -230,53 +231,53 @@
       <key>name</key>
       <string>punctuation.other.janet</string>
     </dict>
-    <!-- string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*]) token match here (?![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])</string -->
+    <!-- string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*]) token match here (?![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])</string -->
     <key>literal</key>
     <dict>
       <key>match</key>
-      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])(true|false|nil)(?![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])</string>
+      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])(true|false|nil)(?![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])</string>
       <key>name</key>
       <string>constant.language.janet</string>
     </dict>
     <key>corelib</key>
     <dict>
       <key>match</key>
-            <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])(%ALLSYMBOLS%)(?![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])</string>
+            <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])(%ALLSYMBOLS%)(?![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])</string>
       <key>name</key>
       <string>keyword.control.janet</string>
     </dict>
     <key>keysym</key>
     <dict>
       <key>match</key>
-      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*]):[\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*]*</string>
+      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*]):[\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*]*</string>
       <key>name</key>
       <string>constant.keyword.janet</string>
     </dict>
     <key>symbol</key>
     <dict>
       <key>match</key>
-      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])[\.a-zA-Z_\-=!@\$%^&amp;?|\\/&lt;&gt;*][\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*]*</string>
+      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])[\.a-zA-Z_\-=!@\$%^&amp;?/&lt;&gt;*][\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*]*</string>
       <key>name</key>
       <string>variable.other.janet</string>
     </dict>
     <key>hex-number</key>
     <dict>
       <key>match</key>
-      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])[-+]?0x([_\da-fA-F]+|[_\da-fA-F]+\.[_\da-fA-F]*|\.[_\da-fA-F]+)(&amp;[+-]?[\da-fA-F]+)?(?![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])</string>
+      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])[-+]?0x([_\da-fA-F]+|[_\da-fA-F]+\.[_\da-fA-F]*|\.[_\da-fA-F]+)(&amp;[+-]?[\da-fA-F]+)?(?![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])</string>
       <key>name</key>
       <string>constant.numeric.hex.janet</string>
     </dict>
     <key>dec-number</key>
     <dict>
       <key>match</key>
-      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])[-+]?([_\d]+|[_\d]+\.[_\d]*|\.[_\d]+)([eE&amp;][+-]?[\d]+)?(?![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])</string>
+      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])[-+]?([_\d]+|[_\d]+\.[_\d]*|\.[_\d]+)([eE&amp;][+-]?[\d]+)?(?![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])</string>
       <key>name</key>
       <string>constant.numeric.decimal.janet</string>
     </dict>
     <key>r-number</key>
     <dict>
       <key>match</key>
-      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])[-+]?\d\d?r([_\w]+|[_\w]+\.[_\w]*|\.[_\w]+)(&amp;[+-]?[\w]+)?(?![\.:\w_\-=!@\$%^&amp;?|\\/&lt;&gt;*])</string>
+      <string>(?&lt;![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])[-+]?\d\d?r([_\w]+|[_\w]+\.[_\w]*|\.[_\w]+)(&amp;[+-]?[\w]+)?(?![\.:\w_\-=!@\$%^&amp;?/&lt;&gt;*])</string>
       <key>name</key>
       <string>constant.numeric.decimal.janet</string>
     </dict>
@@ -308,7 +309,7 @@
       <array>
         <dict>
           <key>match</key>
-          <string>(\\[nevr0zft"\\']|\\x[0-9a-fA-F][0-9a-fA-f])</string>
+          <string>(\\[nevr0zft"\\']|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{6})</string>
           <key>name</key>
           <string>constant.character.escape.janet</string>
         </dict>

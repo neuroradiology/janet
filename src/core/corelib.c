@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019 Calvin Rose
+* Copyright (c) 2023 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -21,6 +21,7 @@
 */
 
 #ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include <math.h>
 #include "compile.h"
@@ -34,38 +35,20 @@ extern const unsigned char *janet_core_image;
 extern size_t janet_core_image_size;
 #endif
 
-/* Use LoadLibrary on windows or dlopen on posix to load dynamic libaries
- * with native code. */
-#if defined(JANET_NO_DYNAMIC_MODULES)
-typedef int Clib;
-#define load_clib(name) ((void) name, 0)
-#define symbol_clib(lib, sym) ((void) lib, (void) sym, NULL)
-#define error_clib() "dynamic libraries not supported"
-#elif defined(JANET_WINDOWS)
-#include <windows.h>
-typedef HINSTANCE Clib;
-#define load_clib(name) LoadLibrary((name))
-#define symbol_clib(lib, sym) GetProcAddress((lib), (sym))
-static char error_clib_buf[256];
-static char *error_clib(void) {
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                   NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                   error_clib_buf, sizeof(error_clib_buf), NULL);
-    error_clib_buf[strlen(error_clib_buf) - 1] = '\0';
-    return error_clib_buf;
-}
+/* Docstrings should only exist during bootstrap */
+#ifdef JANET_BOOTSTRAP
+#define JDOC(x) (x)
 #else
-#include <dlfcn.h>
-typedef void *Clib;
-#define load_clib(name) dlopen((name), RTLD_NOW)
-#define symbol_clib(lib, sym) dlsym((lib), (sym))
-#define error_clib() dlerror()
+#define JDOC(x) NULL
 #endif
 
 JanetModule janet_native(const char *name, const uint8_t **error) {
-    Clib lib = load_clib(name);
+    janet_sandbox_assert(JANET_SANDBOX_DYNAMIC_MODULES);
+    char *processed_name = get_processed_name(name);
+    Clib lib = load_clib(processed_name);
     JanetModule init;
     JanetModconf getter;
+    if (name != processed_name) janet_free(processed_name);
     if (!lib) {
         *error = janet_cstring(error_clib());
         return NULL;
@@ -110,7 +93,7 @@ static const char *janet_dyncstring(const char *name, const char *dflt) {
     const uint8_t *jstr = janet_unwrap_string(x);
     const char *cstr = (const char *)jstr;
     if (strlen(cstr) != (size_t) janet_string_length(jstr)) {
-        janet_panicf("string %v contains embedded 0s");
+        janet_panicf("string %v contains embedded 0s", x);
     }
     return cstr;
 }
@@ -123,7 +106,21 @@ static int is_path_sep(char c) {
 }
 
 /* Used for module system. */
-static Janet janet_core_expand_path(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_expand_path,
+              "(module/expand-path path template)",
+              "Expands a path template as found in `module/paths` for `module/find`. "
+              "This takes in a path (the argument to require) and a template string, "
+              "to expand the path to a path that can be "
+              "used for importing files. The replacements are as follows:\n\n"
+              "* :all: -- the value of path verbatim.\n\n"
+              "* :@all: -- Same as :all:, but if `path` starts with the @ character,\n"
+              "           the first path segment is replaced with a dynamic binding\n"
+              "           `(dyn <first path segment as keyword>)`.\n\n"
+              "* :cur: -- the current file, or (dyn :current-file)\n\n"
+              "* :dir: -- the directory containing the current file\n\n"
+              "* :name: -- the name component of path, with extension if given\n\n"
+              "* :native: -- the extension used to load natives, .so or .dll\n\n"
+              "* :sys: -- the system path, or (dyn :syspath)") {
     janet_fixarity(argc, 2);
     const char *input = janet_getcstring(argv, 0);
     const char *template = janet_getcstring(argv, 1);
@@ -164,6 +161,21 @@ static Janet janet_core_expand_path(int32_t argc, Janet *argv) {
             if (strncmp(template + i, ":all:", 5) == 0) {
                 janet_buffer_push_cstring(out, input);
                 i += 4;
+            } else if (strncmp(template + i, ":@all:", 6) == 0) {
+                if (input[0] == '@') {
+                    const char *p = input;
+                    while (*p && !is_path_sep(*p)) p++;
+                    size_t len = p - input - 1;
+                    char *str = janet_smalloc(len + 1);
+                    memcpy(str, input + 1, len);
+                    str[len] = '\0';
+                    janet_formatb(out, "%V", janet_dyn(str));
+                    janet_sfree(str);
+                    janet_buffer_push_cstring(out, p);
+                } else {
+                    janet_buffer_push_cstring(out, input);
+                }
+                i += 5;
             } else if (strncmp(template + i, ":cur:", 5) == 0) {
                 janet_buffer_push_bytes(out, (const uint8_t *)curdir, curlen);
                 i += 4;
@@ -177,6 +189,13 @@ static Janet janet_core_expand_path(int32_t argc, Janet *argv) {
             } else if (strncmp(template + i, ":name:", 6) == 0) {
                 janet_buffer_push_cstring(out, name);
                 i += 5;
+            } else if (strncmp(template + i, ":native:", 8) == 0) {
+#ifdef JANET_WINDOWS
+                janet_buffer_push_cstring(out, ".dll");
+#else
+                janet_buffer_push_cstring(out, ".so");
+#endif
+                i += 7;
             } else {
                 janet_buffer_push_u8(out, (uint8_t) template[i]);
             }
@@ -239,11 +258,13 @@ static Janet janet_core_expand_path(int32_t argc, Janet *argv) {
     return janet_wrap_buffer(out);
 }
 
-static Janet janet_core_dyn(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_dyn,
+              "(dyn key &opt default)",
+              "Get a dynamic binding. Returns the default value (or nil) if no binding found.") {
     janet_arity(argc, 1, 2);
     Janet value;
-    if (janet_vm_fiber->env) {
-        value = janet_table_get(janet_vm_fiber->env, argv[0]);
+    if (janet_vm.fiber->env) {
+        value = janet_table_get(janet_vm.fiber->env, argv[0]);
     } else {
         value = janet_wrap_nil();
     }
@@ -253,16 +274,24 @@ static Janet janet_core_dyn(int32_t argc, Janet *argv) {
     return value;
 }
 
-static Janet janet_core_setdyn(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_setdyn,
+              "(setdyn key value)",
+              "Set a dynamic binding. Returns value.") {
     janet_fixarity(argc, 2);
-    if (!janet_vm_fiber->env) {
-        janet_vm_fiber->env = janet_table(2);
+    if (!janet_vm.fiber->env) {
+        janet_vm.fiber->env = janet_table(2);
     }
-    janet_table_put(janet_vm_fiber->env, argv[0], argv[1]);
+    janet_table_put(janet_vm.fiber->env, argv[0], argv[1]);
     return argv[1];
 }
 
-static Janet janet_core_native(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_native,
+              "(native path &opt env)",
+              "Load a native module from the given path. The path "
+              "must be an absolute or relative path on the file system, and is "
+              "usually a .so file on Unix systems, and a .dll file on Windows. "
+              "Returns an environment table that contains functions and other values "
+              "from the native module.") {
     JanetModule init;
     janet_arity(argc, 1, 2);
     const uint8_t *path = janet_getstring(argv, 0);
@@ -282,67 +311,107 @@ static Janet janet_core_native(int32_t argc, Janet *argv) {
     return janet_wrap_table(env);
 }
 
-static Janet janet_core_describe(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_describe,
+              "(describe x)",
+              "Returns a string that is a human-readable description of `x`. "
+              "For recursive data structures, the string returned contains a "
+              "pointer value from which the identity of `x` "
+              "can be determined.") {
     JanetBuffer *b = janet_buffer(0);
     for (int32_t i = 0; i < argc; ++i)
         janet_description_b(b, argv[i]);
     return janet_stringv(b->data, b->count);
 }
 
-static Janet janet_core_string(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_string,
+              "(string & xs)",
+              "Creates a string by concatenating the elements of `xs` together. If an "
+              "element is not a byte sequence, it is converted to bytes via `describe`. "
+              "Returns the new string.") {
     JanetBuffer *b = janet_buffer(0);
     for (int32_t i = 0; i < argc; ++i)
         janet_to_string_b(b, argv[i]);
     return janet_stringv(b->data, b->count);
 }
 
-static Janet janet_core_symbol(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_symbol,
+              "(symbol & xs)",
+              "Creates a symbol by concatenating the elements of `xs` together. If an "
+              "element is not a byte sequence, it is converted to bytes via `describe`. "
+              "Returns the new symbol.") {
     JanetBuffer *b = janet_buffer(0);
     for (int32_t i = 0; i < argc; ++i)
         janet_to_string_b(b, argv[i]);
     return janet_symbolv(b->data, b->count);
 }
 
-static Janet janet_core_keyword(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_keyword,
+              "(keyword & xs)",
+              "Creates a keyword by concatenating the elements of `xs` together. If an "
+              "element is not a byte sequence, it is converted to bytes via `describe`. "
+              "Returns the new keyword.") {
     JanetBuffer *b = janet_buffer(0);
     for (int32_t i = 0; i < argc; ++i)
         janet_to_string_b(b, argv[i]);
     return janet_keywordv(b->data, b->count);
 }
 
-static Janet janet_core_buffer(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_buffer,
+              "(buffer & xs)",
+              "Creates a buffer by concatenating the elements of `xs` together. If an "
+              "element is not a byte sequence, it is converted to bytes via `describe`. "
+              "Returns the new buffer.") {
     JanetBuffer *b = janet_buffer(0);
     for (int32_t i = 0; i < argc; ++i)
         janet_to_string_b(b, argv[i]);
     return janet_wrap_buffer(b);
 }
 
-static Janet janet_core_is_abstract(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_is_abstract,
+              "(abstract? x)",
+              "Check if x is an abstract type.") {
     janet_fixarity(argc, 1);
     return janet_wrap_boolean(janet_checktype(argv[0], JANET_ABSTRACT));
 }
 
-static Janet janet_core_scannumber(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_scannumber,
+              "(scan-number str &opt base)",
+              "Parse a number from a byte sequence and return that number, either an integer "
+              "or a real. The number "
+              "must be in the same format as numbers in janet source code. Will return nil "
+              "on an invalid number. Optionally provide a base - if a base is provided, no "
+              "radix specifier is expected at the beginning of the number.") {
     double number;
-    janet_fixarity(argc, 1);
+    janet_arity(argc, 1, 2);
     JanetByteView view = janet_getbytes(argv, 0);
-    if (janet_scan_number(view.bytes, view.len, &number))
+    int32_t base = janet_optinteger(argv, argc, 1, 0);
+    int valid = base == 0 || (base >= 2 && base <= 36);
+    if (!valid) {
+        janet_panicf("expected base between 2 and 36, got %d", base);
+    }
+    if (janet_scan_number_base(view.bytes, view.len, base, &number))
         return janet_wrap_nil();
     return janet_wrap_number(number);
 }
 
-static Janet janet_core_tuple(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_tuple,
+              "(tuple & items)",
+              "Creates a new tuple that contains items. Returns the new tuple.") {
     return janet_wrap_tuple(janet_tuple_n(argv, argc));
 }
 
-static Janet janet_core_array(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_array,
+              "(array & items)",
+              "Create a new array that contains items. Returns the new array.") {
     JanetArray *array = janet_array(argc);
     array->count = argc;
-    memcpy(array->data, argv, argc * sizeof(Janet));
+    safe_memcpy(array->data, argv, argc * sizeof(Janet));
     return janet_wrap_array(array);
 }
 
-static Janet janet_core_slice(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_slice,
+              "(slice x &opt start end)",
+              "Extract a sub-range of an indexed data structure or byte sequence.") {
     JanetRange range;
     JanetByteView bview;
     JanetView iview;
@@ -357,7 +426,12 @@ static Janet janet_core_slice(int32_t argc, Janet *argv) {
     }
 }
 
-static Janet janet_core_table(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_table,
+              "(table & kvs)",
+              "Creates a new table from a variadic number of keys and values. "
+              "kvs is a sequence k1, v1, k2, v2, k3, v3, ... If kvs has "
+              "an odd number of elements, an error will be thrown. Returns the "
+              "new table.") {
     int32_t i;
     if (argc & 1)
         janet_panic("expected even number of arguments");
@@ -368,10 +442,35 @@ static Janet janet_core_table(int32_t argc, Janet *argv) {
     return janet_wrap_table(table);
 }
 
-static Janet janet_core_struct(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_getproto,
+              "(getproto x)",
+              "Get the prototype of a table or struct. Will return nil if `x` has no prototype.") {
+    janet_fixarity(argc, 1);
+    if (janet_checktype(argv[0], JANET_TABLE)) {
+        JanetTable *t = janet_unwrap_table(argv[0]);
+        return t->proto
+               ? janet_wrap_table(t->proto)
+               : janet_wrap_nil();
+    }
+    if (janet_checktype(argv[0], JANET_STRUCT)) {
+        JanetStruct st = janet_unwrap_struct(argv[0]);
+        return janet_struct_proto(st)
+               ? janet_wrap_struct(janet_struct_proto(st))
+               : janet_wrap_nil();
+    }
+    janet_panicf("expected struct or table, got %v", argv[0]);
+}
+
+JANET_CORE_FN(janet_core_struct,
+              "(struct & kvs)",
+              "Create a new struct from a sequence of key value pairs. "
+              "kvs is a sequence k1, v1, k2, v2, k3, v3, ... If kvs has "
+              "an odd number of elements, an error will be thrown. Returns the "
+              "new struct.") {
     int32_t i;
-    if (argc & 1)
+    if (argc & 1) {
         janet_panic("expected even number of arguments");
+    }
     JanetKV *st = janet_struct_begin(argc >> 1);
     for (i = 0; i < argc; i += 2) {
         janet_struct_put(st, argv[i], argv[i + 1]);
@@ -379,35 +478,69 @@ static Janet janet_core_struct(int32_t argc, Janet *argv) {
     return janet_wrap_struct(janet_struct_end(st));
 }
 
-static Janet janet_core_gensym(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_gensym,
+              "(gensym)",
+              "Returns a new symbol that is unique across the runtime. This means it "
+              "will not collide with any already created symbols during compilation, so "
+              "it can be used in macros to generate automatic bindings.") {
     (void) argv;
     janet_fixarity(argc, 0);
     return janet_wrap_symbol(janet_symbol_gen());
 }
 
-static Janet janet_core_gccollect(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_gccollect,
+              "(gccollect)",
+              "Run garbage collection. You should probably not call this manually.") {
     (void) argv;
     (void) argc;
     janet_collect();
     return janet_wrap_nil();
 }
 
-static Janet janet_core_gcsetinterval(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_gcsetinterval,
+              "(gcsetinterval interval)",
+              "Set an integer number of bytes to allocate before running garbage collection. "
+              "Low values for interval will be slower but use less memory. "
+              "High values will be faster but use more memory.") {
     janet_fixarity(argc, 1);
-    int32_t val = janet_getinteger(argv, 0);
-    if (val < 0)
-        janet_panic("expected non-negative integer");
-    janet_vm_gc_interval = val;
+    size_t s = janet_getsize(argv, 0);
+    /* limit interval to 48 bits */
+#ifdef JANET_64
+    if (s >> 48) {
+        janet_panic("interval too large");
+    }
+#endif
+    janet_vm.gc_interval = s;
     return janet_wrap_nil();
 }
 
-static Janet janet_core_gcinterval(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_gcinterval,
+              "(gcinterval)",
+              "Returns the integer number of bytes to allocate before running an iteration "
+              "of garbage collection.") {
     (void) argv;
     janet_fixarity(argc, 0);
-    return janet_wrap_number(janet_vm_gc_interval);
+    return janet_wrap_number((double) janet_vm.gc_interval);
 }
 
-static Janet janet_core_type(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_type,
+              "(type x)",
+              "Returns the type of `x` as a keyword. `x` is one of:\n\n"
+              "* :nil\n\n"
+              "* :boolean\n\n"
+              "* :number\n\n"
+              "* :array\n\n"
+              "* :tuple\n\n"
+              "* :table\n\n"
+              "* :struct\n\n"
+              "* :string\n\n"
+              "* :buffer\n\n"
+              "* :symbol\n\n"
+              "* :keyword\n\n"
+              "* :function\n\n"
+              "* :cfunction\n\n"
+              "* :fiber\n\n"
+              "or another keyword for an abstract type.") {
     janet_fixarity(argc, 1);
     JanetType t = janet_type(argv[0]);
     if (t == JANET_ABSTRACT) {
@@ -417,29 +550,24 @@ static Janet janet_core_type(int32_t argc, Janet *argv) {
     }
 }
 
-static Janet janet_core_next(int32_t argc, Janet *argv) {
-    janet_fixarity(argc, 2);
-    JanetDictView view = janet_getdictionary(argv, 0);
-    const JanetKV *end = view.kvs + view.cap;
-    const JanetKV *kv = janet_checktype(argv[1], JANET_NIL)
-                        ? view.kvs
-                        : janet_dict_find(view.kvs, view.cap, argv[1]) + 1;
-    while (kv < end) {
-        if (!janet_checktype(kv->key, JANET_NIL)) return kv->key;
-        kv++;
-    }
-    return janet_wrap_nil();
-}
-
-static Janet janet_core_hash(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_hash,
+              "(hash value)",
+              "Gets a hash for any value. The hash is an integer can be used "
+              "as a cheap hash function for all values. If two values are strictly equal, "
+              "then they will have the same hash value.") {
     janet_fixarity(argc, 1);
     return janet_wrap_number(janet_hash(argv[0]));
 }
 
-static Janet janet_core_getline(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_getline,
+              "(getline &opt prompt buf env)",
+              "Reads a line of input into a buffer, including the newline character, using a prompt. "
+              "An optional environment table can be provided for auto-complete. "
+              "Returns the modified buffer. "
+              "Use this function to implement a simple interface for a terminal program.") {
     FILE *in = janet_dynfile("in", stdin);
     FILE *out = janet_dynfile("out", stdout);
-    janet_arity(argc, 0, 2);
+    janet_arity(argc, 0, 3);
     JanetBuffer *buf = (argc >= 2) ? janet_getbuffer(argv, 1) : janet_buffer(10);
     if (argc >= 1) {
         const char *prompt = (const char *) janet_getstring(argv, 0);
@@ -461,21 +589,27 @@ static Janet janet_core_getline(int32_t argc, Janet *argv) {
     return janet_wrap_buffer(buf);
 }
 
-static Janet janet_core_trace(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_trace,
+              "(trace func)",
+              "Enable tracing on a function. Returns the function.") {
     janet_fixarity(argc, 1);
     JanetFunction *func = janet_getfunction(argv, 0);
     func->gc.flags |= JANET_FUNCFLAG_TRACE;
     return argv[0];
 }
 
-static Janet janet_core_untrace(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_untrace,
+              "(untrace func)",
+              "Disables tracing on a function. Returns the function.") {
     janet_fixarity(argc, 1);
     JanetFunction *func = janet_getfunction(argv, 0);
     func->gc.flags &= ~JANET_FUNCFLAG_TRACE;
     return argv[0];
 }
 
-static Janet janet_core_check_int(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_check_int,
+              "(int? x)",
+              "Check if x can be exactly represented as a 32 bit signed two's complement integer.") {
     janet_fixarity(argc, 1);
     if (!janet_checktype(argv[0], JANET_NUMBER)) goto ret_false;
     double num = janet_unwrap_number(argv[0]);
@@ -484,7 +618,9 @@ ret_false:
     return janet_wrap_false();
 }
 
-static Janet janet_core_check_nat(int32_t argc, Janet *argv) {
+JANET_CORE_FN(janet_core_check_nat,
+              "(nat? x)",
+              "Check if x can be exactly represented as a non-negative 32 bit signed two's complement integer.") {
     janet_fixarity(argc, 1);
     if (!janet_checktype(argv[0], JANET_NUMBER)) goto ret_false;
     double num = janet_unwrap_number(argv[0]);
@@ -493,200 +629,108 @@ ret_false:
     return janet_wrap_false();
 }
 
-static const JanetReg corelib_cfuns[] = {
-    {
-        "native", janet_core_native,
-        JDOC("(native path &opt env)\n\n"
-             "Load a native module from the given path. The path "
-             "must be an absolute or relative path on the file system, and is "
-             "usually a .so file on Unix systems, and a .dll file on Windows. "
-             "Returns an environment table that contains functions and other values "
-             "from the native module.")
-    },
-    {
-        "describe", janet_core_describe,
-        JDOC("(describe x)\n\n"
-             "Returns a string that is a human readable description of a value x.")
-    },
-    {
-        "string", janet_core_string,
-        JDOC("(string & parts)\n\n"
-             "Creates a string by concatenating values together. Values are "
-             "converted to bytes via describe if they are not byte sequences. "
-             "Returns the new string.")
-    },
-    {
-        "symbol", janet_core_symbol,
-        JDOC("(symbol & xs)\n\n"
-             "Creates a symbol by concatenating values together. Values are "
-             "converted to bytes via describe if they are not byte sequences. Returns "
-             "the new symbol.")
-    },
-    {
-        "keyword", janet_core_keyword,
-        JDOC("(keyword & xs)\n\n"
-             "Creates a keyword by concatenating values together. Values are "
-             "converted to bytes via describe if they are not byte sequences. Returns "
-             "the new keyword.")
-    },
-    {
-        "buffer", janet_core_buffer,
-        JDOC("(buffer & xs)\n\n"
-             "Creates a new buffer by concatenating values together. Values are "
-             "converted to bytes via describe if they are not byte sequences. Returns "
-             "the new buffer.")
-    },
-    {
-        "abstract?", janet_core_is_abstract,
-        JDOC("(abstract? x)\n\n"
-             "Check if x is an abstract type.")
-    },
-    {
-        "table", janet_core_table,
-        JDOC("(table & kvs)\n\n"
-             "Creates a new table from a variadic number of keys and values. "
-             "kvs is a sequence k1, v1, k2, v2, k3, v3, ... If kvs has "
-             "an odd number of elements, an error will be thrown. Returns the "
-             "new table.")
-    },
-    {
-        "array", janet_core_array,
-        JDOC("(array & items)\n\n"
-             "Create a new array that contains items. Returns the new array.")
-    },
-    {
-        "scan-number", janet_core_scannumber,
-        JDOC("(scan-number str)\n\n"
-             "Parse a number from a byte sequence an return that number, either and integer "
-             "or a real. The number "
-             "must be in the same format as numbers in janet source code. Will return nil "
-             "on an invalid number.")
-    },
-    {
-        "tuple", janet_core_tuple,
-        JDOC("(tuple & items)\n\n"
-             "Creates a new tuple that contains items. Returns the new tuple.")
-    },
-    {
-        "struct", janet_core_struct,
-        JDOC("(struct & kvs)\n\n"
-             "Create a new struct from a sequence of key value pairs. "
-             "kvs is a sequence k1, v1, k2, v2, k3, v3, ... If kvs has "
-             "an odd number of elements, an error will be thrown. Returns the "
-             "new struct.")
-    },
-    {
-        "gensym", janet_core_gensym,
-        JDOC("(gensym)\n\n"
-             "Returns a new symbol that is unique across the runtime. This means it "
-             "will not collide with any already created symbols during compilation, so "
-             "it can be used in macros to generate automatic bindings.")
-    },
-    {
-        "gccollect", janet_core_gccollect,
-        JDOC("(gccollect)\n\n"
-             "Run garbage collection. You should probably not call this manually.")
-    },
-    {
-        "gcsetinterval", janet_core_gcsetinterval,
-        JDOC("(gcsetinterval interval)\n\n"
-             "Set an integer number of bytes to allocate before running garbage collection. "
-             "Low valuesi for interval will be slower but use less memory. "
-             "High values will be faster but use more memory.")
-    },
-    {
-        "gcinterval", janet_core_gcinterval,
-        JDOC("(gcinterval)\n\n"
-             "Returns the integer number of bytes to allocate before running an iteration "
-             "of garbage collection.")
-    },
-    {
-        "type", janet_core_type,
-        JDOC("(type x)\n\n"
-             "Returns the type of x as a keyword symbol. x is one of\n"
-             "\t:nil\n"
-             "\t:boolean\n"
-             "\t:integer\n"
-             "\t:real\n"
-             "\t:array\n"
-             "\t:tuple\n"
-             "\t:table\n"
-             "\t:struct\n"
-             "\t:string\n"
-             "\t:buffer\n"
-             "\t:symbol\n"
-             "\t:keyword\n"
-             "\t:function\n"
-             "\t:cfunction\n\n"
-             "or another symbol for an abstract type.")
-    },
-    {
-        "next", janet_core_next,
-        JDOC("(next dict &opt key)\n\n"
-             "Gets the next key in a struct or table. Can be used to iterate through "
-             "the keys of a data structure in an unspecified order. Keys are guaranteed "
-             "to be seen only once per iteration if they data structure is not mutated "
-             "during iteration. If key is nil, next returns the first key. If next "
-             "returns nil, there are no more keys to iterate through. ")
-    },
-    {
-        "hash", janet_core_hash,
-        JDOC("(hash value)\n\n"
-             "Gets a hash value for any janet value. The hash is an integer can be used "
-             "as a cheap hash function for all janet objects. If two values are strictly equal, "
-             "then they will have the same hash value.")
-    },
-    {
-        "getline", janet_core_getline,
-        JDOC("(getline &opt prompt buf)\n\n"
-             "Reads a line of input into a buffer, including the newline character, using a prompt. Returns the modified buffer. "
-             "Use this function to implement a simple interface for a terminal program.")
-    },
-    {
-        "dyn", janet_core_dyn,
-        JDOC("(dyn key &opt default)\n\n"
-             "Get a dynamic binding. Returns the default value (or nil) if no binding found.")
-    },
-    {
-        "setdyn", janet_core_setdyn,
-        JDOC("(setdyn key value)\n\n"
-             "Set a dynamic binding. Returns value.")
-    },
-    {
-        "trace", janet_core_trace,
-        JDOC("(trace func)\n\n"
-             "Enable tracing on a function. Returns the function.")
-    },
-    {
-        "untrace", janet_core_untrace,
-        JDOC("(untrace func)\n\n"
-             "Disables tracing on a function. Returns the function.")
-    },
-    {
-        "module/expand-path", janet_core_expand_path,
-        JDOC("(module/expand-path path template)\n\n"
-             "Expands a path template as found in module/paths for module/find. "
-             "This takes in a path (the argument to require) and a template string, template, "
-             "to expand the path to a path that can be "
-             "used for importing files.")
-    },
-    {
-        "int?", janet_core_check_int,
-        JDOC("(int? x)\n\n"
-             "Check if x can be exactly represented as a 32 bit signed two's complement integer.")
-    },
-    {
-        "nat?", janet_core_check_nat,
-        JDOC("(nat? x)\n\n"
-             "Check if x can be exactly represented as a non-negative 32 bit signed two's complement integer.")
-    },
-    {
-        "slice", janet_core_slice,
-        JDOC("(slice x &opt start end)\n\n"
-             "Extract a sub-range of an indexed data strutrue or byte sequence.")
-    },
-    {NULL, NULL, NULL}
+JANET_CORE_FN(janet_core_signal,
+              "(signal what x)",
+              "Raise a signal with payload x. ") {
+    janet_arity(argc, 1, 2);
+    Janet payload = argc == 2 ? argv[1] : janet_wrap_nil();
+    if (janet_checkint(argv[0])) {
+        int32_t s = janet_unwrap_integer(argv[0]);
+        if (s < 0 || s > 9) {
+            janet_panicf("expected user signal between 0 and 9, got %d", s);
+        }
+        janet_signalv(JANET_SIGNAL_USER0 + s, payload);
+    } else {
+        JanetKeyword kw = janet_getkeyword(argv, 0);
+        for (unsigned i = 0; i < sizeof(janet_signal_names) / sizeof(char *); i++) {
+            if (!janet_cstrcmp(kw, janet_signal_names[i])) {
+                janet_signalv((JanetSignal) i, payload);
+            }
+        }
+    }
+    janet_panicf("unknown signal %v", argv[0]);
+}
+
+JANET_CORE_FN(janet_core_memcmp,
+              "(memcmp a b &opt len offset-a offset-b)",
+              "Compare memory. Takes two byte sequences `a` and `b`, and "
+              "return 0 if they have identical contents, a negative integer if a is less than b, "
+              "and a positive integer if a is greater than b. Optionally take a length and offsets "
+              "to compare slices of the bytes sequences.") {
+    janet_arity(argc, 2, 5);
+    JanetByteView a = janet_getbytes(argv, 0);
+    JanetByteView b = janet_getbytes(argv, 1);
+    int32_t len = janet_optnat(argv, argc, 2, a.len < b.len ? a.len : b.len);
+    int32_t offset_a = janet_optnat(argv, argc, 3, 0);
+    int32_t offset_b = janet_optnat(argv, argc, 4, 0);
+    if (offset_a + len > a.len) janet_panicf("invalid offset-a: %d", offset_a);
+    if (offset_b + len > b.len) janet_panicf("invalid offset-b: %d", offset_b);
+    return janet_wrap_integer(memcmp(a.bytes + offset_a, b.bytes + offset_b, (size_t) len));
+}
+
+typedef struct SandboxOption {
+    const char *name;
+    uint32_t flag;
+} SandboxOption;
+
+static const SandboxOption sandbox_options[] = {
+    {"all", JANET_SANDBOX_ALL},
+    {"env", JANET_SANDBOX_ENV},
+    {"ffi", JANET_SANDBOX_FFI},
+    {"ffi-define", JANET_SANDBOX_FFI_DEFINE},
+    {"ffi-jit", JANET_SANDBOX_FFI_JIT},
+    {"ffi-use", JANET_SANDBOX_FFI_USE},
+    {"fs", JANET_SANDBOX_FS},
+    {"fs-read", JANET_SANDBOX_FS_READ},
+    {"fs-temp", JANET_SANDBOX_FS_TEMP},
+    {"fs-write", JANET_SANDBOX_FS_WRITE},
+    {"hrtime", JANET_SANDBOX_HRTIME},
+    {"modules", JANET_SANDBOX_DYNAMIC_MODULES},
+    {"net", JANET_SANDBOX_NET},
+    {"net-connect", JANET_SANDBOX_NET_CONNECT},
+    {"net-listen", JANET_SANDBOX_NET_LISTEN},
+    {"sandbox", JANET_SANDBOX_SANDBOX},
+    {"subprocess", JANET_SANDBOX_SUBPROCESS},
+    {NULL, 0}
 };
+
+JANET_CORE_FN(janet_core_sandbox,
+              "(sandbox & forbidden-capabilities)",
+              "Disable feature sets to prevent the interpreter from using certain system resources. "
+              "Once a feature is disabled, there is no way to re-enable it. Capabilities can be:\n\n"
+              "* :all - disallow all (except IO to stdout, stderr, and stdin)\n"
+              "* :env - disallow reading and write env variables\n"
+              "* :ffi - disallow FFI (recommended if disabling anything else)\n"
+              "* :ffi-define - disallow loading new FFI modules and binding new functions\n"
+              "* :ffi-jit - disallow calling `ffi/jitfn`\n"
+              "* :ffi-use - disallow using any previously bound FFI functions and memory-unsafe functions.\n"
+              "* :fs - disallow access to the file system\n"
+              "* :fs-read - disallow read access to the file system\n"
+              "* :fs-temp - disallow creating temporary files\n"
+              "* :fs-write - disallow write access to the file system\n"
+              "* :hrtime - disallow high-resolution timers\n"
+              "* :modules - disallow load dynamic modules (natives)\n"
+              "* :net - disallow network access\n"
+              "* :net-connect - disallow making outbound network connections\n"
+              "* :net-listen - disallow accepting inbound network connections\n"
+              "* :sandbox - disallow calling this function\n"
+              "* :subprocess - disallow running subprocesses") {
+    uint32_t flags = 0;
+    for (int32_t i = 0; i < argc; i++) {
+        JanetKeyword kw = janet_getkeyword(argv, i);
+        const SandboxOption *opt = sandbox_options;
+        while (opt->name != NULL) {
+            if (janet_cstrcmp(kw, opt->name) == 0) {
+                flags |= opt->flag;
+                break;
+            }
+            opt++;
+        }
+        if (opt->name == NULL) janet_panicf("unknown capability %v", argv[i]);
+    }
+    janet_sandbox(flags);
+    return janet_wrap_nil();
+}
 
 #ifdef JANET_BOOTSTRAP
 
@@ -708,17 +752,18 @@ static void janet_quick_asm(
     def->max_arity = max_arity;
     def->flags = flags;
     def->slotcount = slots;
-    def->bytecode = malloc(bytecode_size);
+    def->bytecode = janet_malloc(bytecode_size);
     def->bytecode_length = (int32_t)(bytecode_size / sizeof(uint32_t));
     def->name = janet_cstring(name);
     if (!def->bytecode) {
         JANET_OUT_OF_MEMORY;
     }
     memcpy(def->bytecode, bytecode, bytecode_size);
+    janet_def_addflags(def);
     janet_def(env, name, janet_wrap_function(janet_thunk(def)), doc);
 }
 
-/* Macros for easier inline janet assembly */
+/* Macros for easier inline assembly */
 #define SSS(op, a, b, c) ((op) | ((a) << 8) | ((b) << 16) | ((c) << 24))
 #define SS(op, a, b) ((op) | ((a) << 8) | ((b) << 16))
 #define SSI(op, a, b, I) ((op) | ((a) << 8) | ((b) << 16) | ((uint32_t)(I) << 24))
@@ -766,7 +811,7 @@ static void templatize_varop(
         SSI(JOP_GET_INDEX, 3, 0, 0), /* accum = args[0] */
         SI(JOP_LOAD_INTEGER, 5, 1), /* i = 1 */
         /* Main loop */
-        SSS(JOP_GET, 4, 0, 5), /* operand = args[i] */
+        SSS(JOP_IN, 4, 0, 5), /* operand = args[i] */
         SSS(op, 3, 3, 4), /* accum = accum op operand */
         SSI(JOP_ADD_IMMEDIATE, 5, 5, 1), /* i++ */
         SSI(JOP_EQUALS, 2, 5, 1), /* jump? = (i == argn) */
@@ -814,7 +859,7 @@ static void templatize_comparator(
         SI(JOP_LOAD_INTEGER, 5, 1), /* i = 1 */
 
         /* Main loop */
-        SSS(JOP_GET, 4, 0, 5), /* next = args[i] */
+        SSS(JOP_IN, 4, 0, 5), /* next = args[i] */
         SSS(op, 2, 3, 4), /* jump? = last compare next */
         SI(JOP_JUMP_IF_NOT, 2, 7), /* if not jump? goto fail (return false) */
         SSI(JOP_ADD_IMMEDIATE, 5, 5, 1), /* i++ */
@@ -861,7 +906,7 @@ static void make_apply(JanetTable *env) {
         SI(JOP_LOAD_INTEGER, 4, 0), /* i = 0 */
 
         /* Main loop */
-        SSS(JOP_GET, 5, 1, 4), /* x = args[i] */
+        SSS(JOP_IN, 5, 1, 4), /* x = args[i] */
         SSI(JOP_ADD_IMMEDIATE, 4, 4, 1), /* i++ */
         SSI(JOP_EQUALS, 3, 4, 2), /* jump? = (i == argn) */
         SI(JOP_JUMP_IF, 3, 3), /* if jump? go forward 3 */
@@ -890,7 +935,7 @@ static const uint32_t error_asm[] = {
 };
 static const uint32_t debug_asm[] = {
     JOP_SIGNAL | (2 << 24),
-    JOP_RETURN_NIL
+    JOP_RETURN
 };
 static const uint32_t yield_asm[] = {
     JOP_SIGNAL | (3 << 24),
@@ -899,6 +944,18 @@ static const uint32_t yield_asm[] = {
 static const uint32_t resume_asm[] = {
     JOP_RESUME | (1 << 24),
     JOP_RETURN
+};
+static const uint32_t cancel_asm[] = {
+    JOP_CANCEL | (1 << 24),
+    JOP_RETURN
+};
+static const uint32_t in_asm[] = {
+    JOP_IN | (1 << 24),
+    JOP_LOAD_NIL | (3 << 8),
+    JOP_EQUALS | (3 << 8) | (3 << 24),
+    JOP_JUMP_IF | (3 << 8) | (2 << 16),
+    JOP_RETURN,
+    JOP_RETURN | (2 << 8)
 };
 static const uint32_t get_asm[] = {
     JOP_GET | (1 << 24),
@@ -924,35 +981,151 @@ static const uint32_t propagate_asm[] = {
     JOP_PROPAGATE | (1 << 24),
     JOP_RETURN
 };
-#endif /* ifndef JANET_NO_BOOTSTRAP */
+static const uint32_t next_asm[] = {
+    JOP_NEXT | (1 << 24),
+    JOP_RETURN
+};
+static const uint32_t modulo_asm[] = {
+    JOP_MODULO | (1 << 24),
+    JOP_RETURN
+};
+static const uint32_t remainder_asm[] = {
+    JOP_REMAINDER | (1 << 24),
+    JOP_RETURN
+};
+static const uint32_t cmp_asm[] = {
+    JOP_COMPARE | (1 << 24),
+    JOP_RETURN
+};
+#endif /* ifdef JANET_BOOTSTRAP */
+
+/*
+ * Setup Environment
+ */
+
+static void janet_load_libs(JanetTable *env) {
+    JanetRegExt corelib_cfuns[] = {
+        JANET_CORE_REG("native", janet_core_native),
+        JANET_CORE_REG("describe", janet_core_describe),
+        JANET_CORE_REG("string", janet_core_string),
+        JANET_CORE_REG("symbol", janet_core_symbol),
+        JANET_CORE_REG("keyword", janet_core_keyword),
+        JANET_CORE_REG("buffer", janet_core_buffer),
+        JANET_CORE_REG("abstract?", janet_core_is_abstract),
+        JANET_CORE_REG("table", janet_core_table),
+        JANET_CORE_REG("array", janet_core_array),
+        JANET_CORE_REG("scan-number", janet_core_scannumber),
+        JANET_CORE_REG("tuple", janet_core_tuple),
+        JANET_CORE_REG("struct", janet_core_struct),
+        JANET_CORE_REG("gensym", janet_core_gensym),
+        JANET_CORE_REG("gccollect", janet_core_gccollect),
+        JANET_CORE_REG("gcsetinterval", janet_core_gcsetinterval),
+        JANET_CORE_REG("gcinterval", janet_core_gcinterval),
+        JANET_CORE_REG("type", janet_core_type),
+        JANET_CORE_REG("hash", janet_core_hash),
+        JANET_CORE_REG("getline", janet_core_getline),
+        JANET_CORE_REG("dyn", janet_core_dyn),
+        JANET_CORE_REG("setdyn", janet_core_setdyn),
+        JANET_CORE_REG("trace", janet_core_trace),
+        JANET_CORE_REG("untrace", janet_core_untrace),
+        JANET_CORE_REG("module/expand-path", janet_core_expand_path),
+        JANET_CORE_REG("int?", janet_core_check_int),
+        JANET_CORE_REG("nat?", janet_core_check_nat),
+        JANET_CORE_REG("slice", janet_core_slice),
+        JANET_CORE_REG("signal", janet_core_signal),
+        JANET_CORE_REG("memcmp", janet_core_memcmp),
+        JANET_CORE_REG("getproto", janet_core_getproto),
+        JANET_CORE_REG("sandbox", janet_core_sandbox),
+        JANET_REG_END
+    };
+    janet_core_cfuns_ext(env, NULL, corelib_cfuns);
+    janet_lib_io(env);
+    janet_lib_math(env);
+    janet_lib_array(env);
+    janet_lib_tuple(env);
+    janet_lib_buffer(env);
+    janet_lib_table(env);
+    janet_lib_struct(env);
+    janet_lib_fiber(env);
+    janet_lib_os(env);
+    janet_lib_parse(env);
+    janet_lib_compile(env);
+    janet_lib_debug(env);
+    janet_lib_string(env);
+    janet_lib_marsh(env);
+#ifdef JANET_PEG
+    janet_lib_peg(env);
+#endif
+#ifdef JANET_ASSEMBLER
+    janet_lib_asm(env);
+#endif
+#ifdef JANET_INT_TYPES
+    janet_lib_inttypes(env);
+#endif
+#ifdef JANET_EV
+    janet_lib_ev(env);
+#endif
+#ifdef JANET_NET
+    janet_lib_net(env);
+#endif
+#ifdef JANET_FFI
+    janet_lib_ffi(env);
+#endif
+}
+
+#ifdef JANET_BOOTSTRAP
 
 JanetTable *janet_core_env(JanetTable *replacements) {
     JanetTable *env = (NULL != replacements) ? replacements : janet_table(0);
-    janet_core_cfuns(env, NULL, corelib_cfuns);
-
-#ifdef JANET_BOOTSTRAP
+    janet_quick_asm(env, JANET_FUN_MODULO,
+                    "mod", 2, 2, 2, 2, modulo_asm, sizeof(modulo_asm),
+                    JDOC("(mod dividend divisor)\n\n"
+                         "Returns the modulo of dividend / divisor."));
+    janet_quick_asm(env, JANET_FUN_REMAINDER,
+                    "%", 2, 2, 2, 2, remainder_asm, sizeof(remainder_asm),
+                    JDOC("(% dividend divisor)\n\n"
+                         "Returns the remainder of dividend / divisor."));
+    janet_quick_asm(env, JANET_FUN_CMP,
+                    "cmp", 2, 2, 2, 2, cmp_asm, sizeof(cmp_asm),
+                    JDOC("(cmp x y)\n\n"
+                         "Returns -1 if x is strictly less than y, 1 if y is strictly greater "
+                         "than x, and 0 otherwise. To return 0, x and y must be the exact same type."));
+    janet_quick_asm(env, JANET_FUN_NEXT,
+                    "next", 2, 1, 2, 2, next_asm, sizeof(next_asm),
+                    JDOC("(next ds &opt key)\n\n"
+                         "Gets the next key in a data structure. Can be used to iterate through "
+                         "the keys of a data structure in an unspecified order. Keys are guaranteed "
+                         "to be seen only once per iteration if they data structure is not mutated "
+                         "during iteration. If key is nil, next returns the first key. If next "
+                         "returns nil, there are no more keys to iterate through."));
     janet_quick_asm(env, JANET_FUN_PROP,
                     "propagate", 2, 2, 2, 2, propagate_asm, sizeof(propagate_asm),
                     JDOC("(propagate x fiber)\n\n"
                          "Propagate a signal from a fiber to the current fiber. The resulting "
                          "stack trace from the current fiber will include frames from fiber. If "
                          "fiber is in a state that can be resumed, resuming the current fiber will "
-                         "first resume fiber."));
+                         "first resume fiber. This function can be used to re-raise an error without "
+                         "losing the original stack trace."));
     janet_quick_asm(env, JANET_FUN_DEBUG,
-                    "debug", 0, 0, 0, 1, debug_asm, sizeof(debug_asm),
-                    JDOC("(debug)\n\n"
+                    "debug", 1, 0, 1, 1, debug_asm, sizeof(debug_asm),
+                    JDOC("(debug &opt x)\n\n"
                          "Throws a debug signal that can be caught by a parent fiber and used to inspect "
-                         "the running state of the current fiber. Returns nil."));
+                         "the running state of the current fiber. Returns the value passed in by resume."));
     janet_quick_asm(env, JANET_FUN_ERROR,
                     "error", 1, 1, 1, 1, error_asm, sizeof(error_asm),
                     JDOC("(error e)\n\n"
                          "Throws an error e that can be caught and handled by a parent fiber."));
     janet_quick_asm(env, JANET_FUN_YIELD,
                     "yield", 1, 0, 1, 2, yield_asm, sizeof(yield_asm),
-                    JDOC("(yield x)\n\n"
+                    JDOC("(yield &opt x)\n\n"
                          "Yield a value to a parent fiber. When a fiber yields, its execution is paused until "
                          "another thread resumes it. The fiber will then resume, and the last yield call will "
                          "return the value that was passed to resume."));
+    janet_quick_asm(env, JANET_FUN_CANCEL,
+                    "cancel", 2, 2, 2, 2, cancel_asm, sizeof(cancel_asm),
+                    JDOC("(cancel fiber err)\n\n"
+                         "Resume a fiber but have it immediately raise an error. This lets a programmer unwind a pending fiber. "
+                         "Returns the same result as resume."));
     janet_quick_asm(env, JANET_FUN_RESUME,
                     "resume", 2, 1, 2, 2, resume_asm, sizeof(resume_asm),
                     JDOC("(resume fiber &opt x)\n\n"
@@ -960,15 +1133,20 @@ JanetTable *janet_core_env(JanetTable *replacements) {
                          "will be returned to the last yield in the case of a pending fiber, or the argument to "
                          "the dispatch function in the case of a new fiber. Returns either the return result of "
                          "the fiber's dispatch function, or the value from the next yield call in fiber."));
+    janet_quick_asm(env, JANET_FUN_IN,
+                    "in", 3, 2, 3, 4, in_asm, sizeof(in_asm),
+                    JDOC("(in ds key &opt dflt)\n\n"
+                         "Get value in ds at key, works on associative data structures. Arrays, tuples, tables, structs, "
+                         "strings, symbols, and buffers are all associative and can be used. Arrays, tuples, strings, buffers, "
+                         "and symbols must use integer keys that are in bounds or an error is raised. Structs and tables can "
+                         "take any value as a key except nil and will return nil or dflt if not found."));
     janet_quick_asm(env, JANET_FUN_GET,
-                    "get", 3, 2, 3, 4, get_asm, sizeof(get_asm),
+                    "get", 3, 2, 3, 4, get_asm, sizeof(in_asm),
                     JDOC("(get ds key &opt dflt)\n\n"
-                         "Get a value from any associative data structure. Arrays, tuples, tables, structs, strings, "
-                         "symbols, and buffers are all associative and can be used with get. Order structures, name "
-                         "arrays, tuples, strings, buffers, and symbols must use integer keys. Structs and tables can "
-                         "take any value as a key except nil and return a value except nil. Byte sequences will return "
-                         "integer representations of bytes as result of a get call. If no values is found, will return "
-                         "dflt or nil if no default is provided."));
+                         "Get the value mapped to key in data structure ds, and return dflt or nil if not found. "
+                         "Similar to in, but will not throw an error if the key is invalid for the data structure "
+                         "unless the data structure is an abstract type. In that case, the abstract type getter may throw "
+                         "an error."));
     janet_quick_asm(env, JANET_FUN_PUT,
                     "put", 3, 3, 3, 3, put_asm, sizeof(put_asm),
                     JDOC("(put ds key value)\n\n"
@@ -1004,7 +1182,7 @@ JanetTable *janet_core_env(JanetTable *replacements) {
                      JDOC("(/ & xs)\n\n"
                           "Returns the quotient of xs. If xs is empty, returns 1. If xs has one value x, returns "
                           "the reciprocal of x. Otherwise return the first value of xs repeatedly divided by the remaining "
-                          "values. Division by two integers uses truncating division."));
+                          "values."));
     templatize_varop(env, JANET_FUN_BAND, "band", -1, -1, JOP_BAND,
                      JDOC("(band & xs)\n\n"
                           "Returns the bit-wise and of all values in xs. Each x in xs must be an integer."));
@@ -1029,46 +1207,24 @@ JanetTable *janet_core_env(JanetTable *replacements) {
                           "for positive shifts the return value will always be positive."));
 
     /* Variadic comparators */
-    templatize_comparator(env, JANET_FUN_ORDER_GT, "order>", 0, JOP_GREATER_THAN,
-                          JDOC("(order> & xs)\n\n"
-                               "Check if xs is strictly descending according to a total order "
-                               "over all values. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_ORDER_LT, "order<", 0, JOP_LESS_THAN,
-                          JDOC("(order< & xs)\n\n"
-                               "Check if xs is strictly increasing according to a total order "
-                               "over all values. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_ORDER_GTE, "order>=", 1, JOP_LESS_THAN,
-                          JDOC("(order>= & xs)\n\n"
-                               "Check if xs is not increasing according to a total order "
-                               "over all values. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_ORDER_LTE, "order<=", 1, JOP_GREATER_THAN,
-                          JDOC("(order<= & xs)\n\n"
-                               "Check if xs is not decreasing according to a total order "
-                               "over all values. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_ORDER_EQ, "=", 0, JOP_EQUALS,
-                          JDOC("(= & xs)\n\n"
-                               "Returns true if all values in xs are the same, false otherwise."));
-    templatize_comparator(env, JANET_FUN_ORDER_NEQ, "not=", 1, JOP_EQUALS,
-                          JDOC("(not= & xs)\n\n"
-                               "Return true if any values in xs are not equal, otherwise false."));
-    templatize_comparator(env, JANET_FUN_GT, ">", 0, JOP_NUMERIC_GREATER_THAN,
+    templatize_comparator(env, JANET_FUN_GT, ">", 0, JOP_GREATER_THAN,
                           JDOC("(> & xs)\n\n"
-                               "Check if xs is in numerically descending order. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_LT, "<", 0, JOP_NUMERIC_LESS_THAN,
+                               "Check if xs is in descending order. Returns a boolean."));
+    templatize_comparator(env, JANET_FUN_LT, "<", 0, JOP_LESS_THAN,
                           JDOC("(< & xs)\n\n"
-                               "Check if xs is in numerically ascending order. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_GTE, ">=", 0, JOP_NUMERIC_GREATER_THAN_EQUAL,
+                               "Check if xs is in ascending order. Returns a boolean."));
+    templatize_comparator(env, JANET_FUN_GTE, ">=", 0, JOP_GREATER_THAN_EQUAL,
                           JDOC("(>= & xs)\n\n"
-                               "Check if xs is in numerically non-ascending order. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_LTE, "<=", 0, JOP_NUMERIC_LESS_THAN_EQUAL,
+                               "Check if xs is in non-ascending order. Returns a boolean."));
+    templatize_comparator(env, JANET_FUN_LTE, "<=", 0, JOP_LESS_THAN_EQUAL,
                           JDOC("(<= & xs)\n\n"
-                               "Check if xs is in numerically non-descending order. Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_EQ, "==", 0, JOP_NUMERIC_EQUAL,
-                          JDOC("(== & xs)\n\n"
-                               "Check if all values in xs are numerically equal (4.0 == 4). Returns a boolean."));
-    templatize_comparator(env, JANET_FUN_NEQ, "not==", 1, JOP_NUMERIC_EQUAL,
-                          JDOC("(not== & xs)\n\n"
-                               "Check if any values in xs are not numerically equal (3.0 not== 4). Returns a boolean."));
+                               "Check if xs is in non-descending order. Returns a boolean."));
+    templatize_comparator(env, JANET_FUN_EQ, "=", 0, JOP_EQUALS,
+                          JDOC("(= & xs)\n\n"
+                               "Check if all values in xs are equal. Returns a boolean."));
+    templatize_comparator(env, JANET_FUN_NEQ, "not=", 1, JOP_EQUALS,
+                          JDOC("(not= & xs)\n\n"
+                               "Check if any values in xs are not equal. Returns a boolean."));
 
     /* Platform detection */
     janet_def(env, "janet/version", janet_cstringv(JANET_VERSION),
@@ -1080,50 +1236,71 @@ JanetTable *janet_core_env(JanetTable *replacements) {
                    "if native modules are compatible with the host program."));
 
     /* Allow references to the environment */
-    janet_def(env, "_env", janet_wrap_table(env), JDOC("The environment table for the current scope."));
+    janet_def(env, "root-env", janet_wrap_table(env),
+              JDOC("The root environment used to create environments with (make-env)."));
 
-    /* Set as gc root */
+    janet_load_libs(env);
     janet_gcroot(janet_wrap_table(env));
-#endif
+    return env;
+}
 
-    /* Load auxiliary envs */
-    janet_lib_io(env);
-    janet_lib_math(env);
-    janet_lib_array(env);
-    janet_lib_tuple(env);
-    janet_lib_buffer(env);
-    janet_lib_table(env);
-    janet_lib_fiber(env);
-    janet_lib_os(env);
-    janet_lib_parse(env);
-    janet_lib_compile(env);
-    janet_lib_debug(env);
-    janet_lib_string(env);
-    janet_lib_marsh(env);
-#ifdef JANET_PEG
-    janet_lib_peg(env);
-#endif
-#ifdef JANET_ASSEMBLER
-    janet_lib_asm(env);
-#endif
-#ifdef JANET_TYPED_ARRAY
-    janet_lib_typed_array(env);
-#endif
-#ifdef JANET_INT_TYPES
-    janet_lib_inttypes(env);
-#endif
+#else
 
-#ifndef JANET_BOOTSTRAP
-    /* Unmarshal from core image */
+JanetTable *janet_core_env(JanetTable *replacements) {
+    /* Memoize core env, ignoring replacements the second time around. */
+    if (NULL != janet_vm.core_env) {
+        return janet_vm.core_env;
+    }
+
+    JanetTable *dict = janet_core_lookup_table(replacements);
+
+    /* Unmarshal bytecode */
     Janet marsh_out = janet_unmarshal(
                           janet_core_image,
                           janet_core_image_size,
                           0,
-                          env,
+                          dict,
                           NULL);
+
+    /* Memoize */
     janet_gcroot(marsh_out);
-    env = janet_unwrap_table(marsh_out);
-#endif
+    JanetTable *env = janet_unwrap_table(marsh_out);
+    janet_vm.core_env = env;
+
+    /* Invert image dict manually here. We can't do this in boot.janet as it
+     * breaks deterministic builds */
+    Janet lidv, midv;
+    lidv = midv = janet_wrap_nil();
+    janet_resolve(env, janet_csymbol("load-image-dict"), &lidv);
+    janet_resolve(env, janet_csymbol("make-image-dict"), &midv);
+    JanetTable *lid = janet_unwrap_table(lidv);
+    JanetTable *mid = janet_unwrap_table(midv);
+    for (int32_t i = 0; i < lid->capacity; i++) {
+        const JanetKV *kv = lid->data + i;
+        if (!janet_checktype(kv->key, JANET_NIL)) {
+            janet_table_put(mid, kv->value, kv->key);
+        }
+    }
 
     return env;
+}
+
+#endif
+
+JanetTable *janet_core_lookup_table(JanetTable *replacements) {
+    JanetTable *dict = janet_table(512);
+    janet_load_libs(dict);
+
+    /* Add replacements */
+    if (replacements != NULL) {
+        for (int32_t i = 0; i < replacements->capacity; i++) {
+            JanetKV kv = replacements->data[i];
+            if (!janet_checktype(kv.key, JANET_NIL)) {
+                janet_table_put(dict, kv.key, kv.value);
+                /* Add replacement functions to registry? */
+            }
+        }
+    }
+
+    return dict;
 }

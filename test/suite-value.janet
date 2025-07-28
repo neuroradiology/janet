@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -42,7 +42,7 @@
 
 (defn buffer-factory
   []
-  @"im am a buffer")
+  @"i am a buffer")
 
 (assert (not= (buffer-factory) (buffer-factory)) "buffer instantiation")
 

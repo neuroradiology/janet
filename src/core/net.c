@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose and contributors.
+* Copyright (c) 2025 Calvin Rose and contributors.
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -24,6 +24,7 @@
 #include "features.h"
 #include <janet.h>
 #include "util.h"
+#include "fiber.h"
 #endif
 
 #ifdef JANET_NET
@@ -78,11 +79,19 @@ const JanetAbstractType janet_address_type = {
 
 /* maximum number of bytes in a socket address host (post name resolution) */
 #ifdef JANET_WINDOWS
+#ifdef JANET_NO_IPV6
+#define SA_ADDRSTRLEN (INET_ADDRSTRLEN + 1)
+#else
 #define SA_ADDRSTRLEN (INET6_ADDRSTRLEN + 1)
+#endif
 typedef unsigned short in_port_t;
 #else
 #define JANET_SA_MAX(a, b) (((a) > (b))? (a) : (b))
+#ifdef JANET_NO_IPV6
+#define SA_ADDRSTRLEN JANET_SA_MAX(INET_ADDRSTRLEN + 1, (sizeof ((struct sockaddr_un *)0)->sun_path) + 1)
+#else
 #define SA_ADDRSTRLEN JANET_SA_MAX(INET6_ADDRSTRLEN + 1, (sizeof ((struct sockaddr_un *)0)->sun_path) + 1)
+#endif
 #endif
 
 static JanetStream *make_stream(JSock handle, uint32_t flags);
@@ -111,12 +120,57 @@ static void janet_net_socknoblock(JSock s) {
 #endif
 }
 
+/* State machine for async connect */
+
+void net_callback_connect(JanetFiber *fiber, JanetAsyncEvent event) {
+    JanetStream *stream = fiber->ev_stream;
+    switch (event) {
+        default:
+            break;
+#ifndef JANET_WINDOWS
+        /* Wait until we have an actual event before checking.
+         * Windows doesn't support async connect with this, just try immediately.*/
+        case JANET_ASYNC_EVENT_INIT:
+#endif
+        case JANET_ASYNC_EVENT_DEINIT:
+            return;
+        case JANET_ASYNC_EVENT_CLOSE:
+            janet_cancel(fiber, janet_cstringv("stream closed"));
+            janet_async_end(fiber);
+            return;
+    }
+#ifdef JANET_WINDOWS
+    int res = 0;
+    int size = sizeof(res);
+    int r = getsockopt((SOCKET)stream->handle, SOL_SOCKET, SO_ERROR, (char *)&res, &size);
+#else
+    int res = 0;
+    socklen_t size = sizeof res;
+    int r = getsockopt(stream->handle, SOL_SOCKET, SO_ERROR, &res, &size);
+#endif
+    if (r == 0) {
+        if (res == 0) {
+            janet_schedule(fiber, janet_wrap_abstract(stream));
+        } else {
+            janet_cancel(fiber, janet_cstringv(janet_strerror(res)));
+            stream->flags |= JANET_STREAM_TOCLOSE;
+        }
+    } else {
+        janet_cancel(fiber, janet_ev_lasterr());
+        stream->flags |= JANET_STREAM_TOCLOSE;
+    }
+    janet_async_end(fiber);
+}
+
+static JANET_NO_RETURN void net_sched_connect(JanetStream *stream) {
+    janet_async_start(stream, JANET_ASYNC_LISTEN_WRITE, net_callback_connect, NULL);
+}
+
 /* State machine for accepting connections. */
 
 #ifdef JANET_WINDOWS
 
 typedef struct {
-    JanetListenerState head;
     WSAOVERLAPPED overlapped;
     JanetFunction *function;
     JanetStream *lstream;
@@ -124,10 +178,10 @@ typedef struct {
     char buf[1024];
 } NetStateAccept;
 
-static int net_sched_accept_impl(NetStateAccept *state, Janet *err);
+static int net_sched_accept_impl(NetStateAccept *state, JanetFiber *fiber, Janet *err);
 
-JanetAsyncStatus net_machine_accept(JanetListenerState *s, JanetAsyncEvent event) {
-    NetStateAccept *state = (NetStateAccept *)s;
+void net_callback_accept(JanetFiber *fiber, JanetAsyncEvent event) {
+    NetStateAccept *state = (NetStateAccept *)fiber->ev_state;
     switch (event) {
         default:
             break;
@@ -138,55 +192,60 @@ JanetAsyncStatus net_machine_accept(JanetListenerState *s, JanetAsyncEvent event
             break;
         }
         case JANET_ASYNC_EVENT_CLOSE:
-            janet_schedule(s->fiber, janet_wrap_nil());
-            return JANET_ASYNC_STATUS_DONE;
+            janet_schedule(fiber, janet_wrap_nil());
+            janet_async_end(fiber);
+            return;
         case JANET_ASYNC_EVENT_COMPLETE: {
             if (state->astream->flags & JANET_STREAM_CLOSED) {
-                janet_cancel(s->fiber, janet_cstringv("failed to accept connection"));
-                return JANET_ASYNC_STATUS_DONE;
+                janet_cancel(fiber, janet_cstringv("failed to accept connection"));
+                janet_async_end(fiber);
+                return;
             }
             SOCKET lsock = (SOCKET) state->lstream->handle;
             if (NO_ERROR != setsockopt((SOCKET) state->astream->handle, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
                                        (char *) &lsock, sizeof(lsock))) {
-                janet_cancel(s->fiber, janet_cstringv("failed to accept connection"));
-                return JANET_ASYNC_STATUS_DONE;
+                janet_cancel(fiber, janet_cstringv("failed to accept connection"));
+                janet_async_end(fiber);
+                return;
             }
 
             Janet streamv = janet_wrap_abstract(state->astream);
             if (state->function) {
                 /* Schedule worker */
-                JanetFiber *fiber = janet_fiber(state->function, 64, 1, &streamv);
-                fiber->supervisor_channel = s->fiber->supervisor_channel;
-                janet_schedule(fiber, janet_wrap_nil());
+                JanetFiber *sub_fiber = janet_fiber(state->function, 64, 1, &streamv);
+                sub_fiber->supervisor_channel = fiber->supervisor_channel;
+                janet_schedule(sub_fiber, janet_wrap_nil());
                 /* Now listen again for next connection */
                 Janet err;
-                if (net_sched_accept_impl(state, &err)) {
-                    janet_cancel(s->fiber, err);
-                    return JANET_ASYNC_STATUS_DONE;
+                if (net_sched_accept_impl(state, fiber, &err)) {
+                    janet_cancel(fiber, err);
+                    janet_async_end(fiber);
+                    return;
                 }
             } else {
-                janet_schedule(s->fiber, streamv);
-                return JANET_ASYNC_STATUS_DONE;
+                janet_schedule(fiber, streamv);
+                janet_async_end(fiber);
+                return;
             }
         }
     }
-    return JANET_ASYNC_STATUS_NOT_DONE;
 }
 
 JANET_NO_RETURN static void janet_sched_accept(JanetStream *stream, JanetFunction *fun) {
     Janet err;
-    JanetListenerState *s = janet_listen(stream, net_machine_accept, JANET_ASYNC_LISTEN_READ, sizeof(NetStateAccept), NULL);
-    NetStateAccept *state = (NetStateAccept *)s;
+    NetStateAccept *state = janet_malloc(sizeof(NetStateAccept));
     memset(&state->overlapped, 0, sizeof(WSAOVERLAPPED));
     memset(&state->buf, 0, 1024);
     state->function = fun;
     state->lstream = stream;
-    s->tag = &state->overlapped;
-    if (net_sched_accept_impl(state, &err)) janet_panicv(err);
-    janet_await();
+    if (net_sched_accept_impl(state, janet_root_fiber(), &err)) {
+        janet_free(state);
+        janet_panicv(err);
+    }
+    janet_async_start(stream, JANET_ASYNC_LISTEN_READ, net_callback_accept, state);
 }
 
-static int net_sched_accept_impl(NetStateAccept *state, Janet *err) {
+static int net_sched_accept_impl(NetStateAccept *state, JanetFiber *fiber, Janet *err) {
     SOCKET lsock = (SOCKET) state->lstream->handle;
     SOCKET asock = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
     if (asock == INVALID_SOCKET) {
@@ -198,7 +257,11 @@ static int net_sched_accept_impl(NetStateAccept *state, Janet *err) {
     int socksize = sizeof(SOCKADDR_STORAGE) + 16;
     if (FALSE == AcceptEx(lsock, asock, state->buf, 0, socksize, socksize, NULL, &state->overlapped)) {
         int code = WSAGetLastError();
-        if (code == WSA_IO_PENDING) return 0; /* indicates io is happening async */
+        if (code == WSA_IO_PENDING) {
+            /* indicates io is happening async */
+            janet_async_in_flight(fiber);
+            return 0;
+        }
         *err = janet_ev_lasterr();
         return 1;
     }
@@ -208,12 +271,12 @@ static int net_sched_accept_impl(NetStateAccept *state, Janet *err) {
 #else
 
 typedef struct {
-    JanetListenerState head;
     JanetFunction *function;
 } NetStateAccept;
 
-JanetAsyncStatus net_machine_accept(JanetListenerState *s, JanetAsyncEvent event) {
-    NetStateAccept *state = (NetStateAccept *)s;
+void net_callback_accept(JanetFiber *fiber, JanetAsyncEvent event) {
+    JanetStream *stream = fiber->ev_stream;
+    NetStateAccept *state = (NetStateAccept *)fiber->ev_state;
     switch (event) {
         default:
             break;
@@ -222,43 +285,47 @@ JanetAsyncStatus net_machine_accept(JanetListenerState *s, JanetAsyncEvent event
             break;
         }
         case JANET_ASYNC_EVENT_CLOSE:
-            janet_schedule(s->fiber, janet_wrap_nil());
-            return JANET_ASYNC_STATUS_DONE;
+            janet_schedule(fiber, janet_wrap_nil());
+            janet_async_end(fiber);
+            return;
+        case JANET_ASYNC_EVENT_INIT:
         case JANET_ASYNC_EVENT_READ: {
 #if defined(JANET_LINUX)
-            JSock connfd = accept4(s->stream->handle, NULL, NULL, SOCK_CLOEXEC);
+            JSock connfd = accept4(stream->handle, NULL, NULL, SOCK_CLOEXEC);
 #else
             /* On BSDs, CLOEXEC should be inherited from server socket */
-            JSock connfd = accept(s->stream->handle, NULL, NULL);
+            JSock connfd = accept(stream->handle, NULL, NULL);
 #endif
             if (JSOCKVALID(connfd)) {
                 janet_net_socknoblock(connfd);
                 JanetStream *stream = make_stream(connfd, JANET_STREAM_READABLE | JANET_STREAM_WRITABLE);
                 Janet streamv = janet_wrap_abstract(stream);
                 if (state->function) {
-                    JanetFiber *fiber = janet_fiber(state->function, 64, 1, &streamv);
-                    fiber->supervisor_channel = s->fiber->supervisor_channel;
-                    janet_schedule(fiber, janet_wrap_nil());
+                    JanetFiber *sub_fiber = janet_fiber(state->function, 64, 1, &streamv);
+                    sub_fiber->supervisor_channel = fiber->supervisor_channel;
+                    janet_schedule(sub_fiber, janet_wrap_nil());
                 } else {
-                    janet_schedule(s->fiber, streamv);
-                    return JANET_ASYNC_STATUS_DONE;
+                    janet_schedule(fiber, streamv);
+                    janet_async_end(fiber);
+                    return;
                 }
             }
             break;
         }
     }
-    return JANET_ASYNC_STATUS_NOT_DONE;
 }
 
 JANET_NO_RETURN static void janet_sched_accept(JanetStream *stream, JanetFunction *fun) {
-    NetStateAccept *state = (NetStateAccept *) janet_listen(stream, net_machine_accept, JANET_ASYNC_LISTEN_READ, sizeof(NetStateAccept), NULL);
+    NetStateAccept *state = janet_malloc(sizeof(NetStateAccept));
+    memset(state, 0, sizeof(NetStateAccept));
     state->function = fun;
-    janet_await();
+    if (fun) janet_stream_level_triggered(stream);
+    janet_async_start(stream, JANET_ASYNC_LISTEN_READ, net_callback_accept, state);
 }
 
 #endif
 
-/* Adress info */
+/* Address info */
 
 static int janet_get_sockettype(Janet *argv, int32_t argc, int32_t n) {
     JanetKeyword stype = janet_optkeyword(argv, argc, n, NULL);
@@ -487,7 +554,10 @@ JANET_CORE_FN(cfun_net_connect,
     int err = WSAGetLastError();
     freeaddrinfo(ai);
 #else
-    int status = connect(sock, addr, addrlen);
+    int status;
+    do {
+        status = connect(sock, addr, addrlen);
+    } while (status == -1 && errno == EINTR);
     int err = errno;
     if (is_unix) {
         janet_free(ai);
@@ -496,7 +566,7 @@ JANET_CORE_FN(cfun_net_connect,
     }
 #endif
 
-    if (status != 0) {
+    if (status) {
 #ifdef JANET_WINDOWS
         if (err != WSAEWOULDBLOCK) {
 #else
@@ -508,23 +578,26 @@ JANET_CORE_FN(cfun_net_connect,
         }
     }
 
-    /* Handle the connect() result in the event loop*/
-    janet_ev_connect(stream, MSG_NOSIGNAL);
-
-    janet_await();
+    net_sched_connect(stream);
 }
 
-static const char *serverify_socket(JSock sfd) {
+static const char *serverify_socket(JSock sfd, int reuse_addr, int reuse_port) {
     /* Set various socket options */
     int enable = 1;
-    if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *) &enable, sizeof(int)) < 0) {
-        return "setsockopt(SO_REUSEADDR) failed";
+    if (reuse_addr) {
+        if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *) &enable, sizeof(int)) < 0) {
+            return "setsockopt(SO_REUSEADDR) failed";
+        }
     }
+    if (reuse_port) {
 #ifdef SO_REUSEPORT
-    if (setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) < 0) {
-        return "setsockopt(SO_REUSEPORT) failed";
-    }
+        if (setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) < 0) {
+            return "setsockopt(SO_REUSEPORT) failed";
+        }
+#else
+        (void) reuse_port;
 #endif
+    }
     janet_net_socknoblock(sfd);
     return NULL;
 }
@@ -578,19 +651,21 @@ JANET_CORE_FN(cfun_net_shutdown,
 }
 
 JANET_CORE_FN(cfun_net_listen,
-              "(net/listen host port &opt type)",
+              "(net/listen host port &opt type no-reuse)",
               "Creates a server. Returns a new stream that is neither readable nor "
               "writeable. Use net/accept or net/accept-loop be to handle connections and start the server. "
               "The type parameter specifies the type of network connection, either "
               "a :stream (usually tcp), or :datagram (usually udp). If not specified, the default is "
-              ":stream. The host and port arguments are the same as in net/address.") {
+              ":stream. The host and port arguments are the same as in net/address. The last boolean parameter `no-reuse` will "
+              "disable the use of `SO_REUSEADDR` and `SO_REUSEPORT` when creating a server on some operating systems.") {
     janet_sandbox_assert(JANET_SANDBOX_NET_LISTEN);
-    janet_arity(argc, 2, 3);
+    janet_arity(argc, 2, 4);
 
     /* Get host, port, and handler*/
     int socktype = janet_get_sockettype(argv, argc, 2);
     int is_unix = 0;
     struct addrinfo *ai = janet_get_addrinfo(argv, 0, socktype, 1, &is_unix);
+    int reuse = !(argc >= 4 && janet_truthy(argv[3]));
 
     JSock sfd = JSOCKDEFAULT;
 #ifndef JANET_WINDOWS
@@ -600,7 +675,7 @@ JANET_CORE_FN(cfun_net_listen,
             janet_free(ai);
             janet_panicf("could not create socket: %V", janet_ev_lasterr());
         }
-        const char *err = serverify_socket(sfd);
+        const char *err = serverify_socket(sfd, reuse, 0);
         if (NULL != err || bind(sfd, (struct sockaddr *)ai, sizeof(struct sockaddr_un))) {
             JSOCKCLOSE(sfd);
             janet_free(ai);
@@ -623,7 +698,7 @@ JANET_CORE_FN(cfun_net_listen,
             sfd = socket(rp->ai_family, rp->ai_socktype | JSOCKFLAGS, rp->ai_protocol);
 #endif
             if (!JSOCKVALID(sfd)) continue;
-            const char *err = serverify_socket(sfd);
+            const char *err = serverify_socket(sfd, reuse, reuse);
             if (NULL != err) {
                 JSOCKCLOSE(sfd);
                 continue;
@@ -682,6 +757,7 @@ static Janet janet_so_getname(const void *sa_any) {
             Janet pair[2] = {janet_cstringv(buffer), janet_wrap_integer(ntohs(sai->sin_port))};
             return janet_wrap_tuple(janet_tuple_n(pair, 2));
         }
+#ifndef JANET_NO_IPV6
         case AF_INET6: {
             const struct sockaddr_in6 *sai6 = sa_any;
             if (!inet_ntop(AF_INET6, &(sai6->sin6_addr), buffer, sizeof(buffer))) {
@@ -690,6 +766,7 @@ static Janet janet_so_getname(const void *sa_any) {
             Janet pair[2] = {janet_cstringv(buffer), janet_wrap_integer(ntohs(sai6->sin6_port))};
             return janet_wrap_tuple(janet_tuple_n(pair, 2));
         }
+#endif
 #ifndef JANET_WINDOWS
         case AF_UNIX: {
             const struct sockaddr_un *sun = sa_any;
@@ -756,13 +833,14 @@ JANET_CORE_FN(cfun_stream_accept_loop,
     JanetStream *stream = janet_getabstract(argv, 0, &janet_stream_type);
     janet_stream_flags(stream, JANET_STREAM_ACCEPTABLE | JANET_STREAM_SOCKET);
     JanetFunction *fun = janet_getfunction(argv, 1);
+    if (fun->def->min_arity < 1) janet_panic("handler function must take at least 1 argument");
     janet_sched_accept(stream, fun);
 }
 
 JANET_CORE_FN(cfun_stream_accept,
               "(net/accept stream &opt timeout)",
               "Get the next connection on a server stream. This would usually be called in a loop in a dedicated fiber. "
-              "Takes an optional timeout in seconds, after which will return nil. "
+              "Takes an optional timeout in seconds, after which will raise an error. "
               "Returns a new duplex stream which represents a connection to the client.") {
     janet_arity(argc, 1, 2);
     JanetStream *stream = janet_getabstract(argv, 0, &janet_stream_type);
@@ -777,7 +855,7 @@ JANET_CORE_FN(cfun_stream_read,
               "Read up to n bytes from a stream, suspending the current fiber until the bytes are available. "
               "`n` can also be the keyword `:all` to read into the buffer until end of stream. "
               "If less than n bytes are available (and more than 0), will push those bytes and return early. "
-              "Takes an optional timeout in seconds, after which will return nil. "
+              "Takes an optional timeout in seconds, after which will raise an error. "
               "Returns a buffer with up to n more bytes in it, or raises an error if the read failed.") {
     janet_arity(argc, 2, 4);
     JanetStream *stream = janet_getabstract(argv, 0, &janet_stream_type);
@@ -792,13 +870,12 @@ JANET_CORE_FN(cfun_stream_read,
         if (to != INFINITY) janet_addtimeout(to);
         janet_ev_recv(stream, buffer, n, MSG_NOSIGNAL);
     }
-    janet_await();
 }
 
 JANET_CORE_FN(cfun_stream_chunk,
               "(net/chunk stream nbytes &opt buf timeout)",
               "Same a net/read, but will wait for all n bytes to arrive rather than return early. "
-              "Takes an optional timeout in seconds, after which will return nil.") {
+              "Takes an optional timeout in seconds, after which will raise an error.") {
     janet_arity(argc, 2, 4);
     JanetStream *stream = janet_getabstract(argv, 0, &janet_stream_type);
     janet_stream_flags(stream, JANET_STREAM_READABLE | JANET_STREAM_SOCKET);
@@ -807,13 +884,12 @@ JANET_CORE_FN(cfun_stream_chunk,
     double to = janet_optnumber(argv, argc, 3, INFINITY);
     if (to != INFINITY) janet_addtimeout(to);
     janet_ev_recvchunk(stream, buffer, n, MSG_NOSIGNAL);
-    janet_await();
 }
 
 JANET_CORE_FN(cfun_stream_recv_from,
               "(net/recv-from stream nbytes buf &opt timeout)",
               "Receives data from a server stream and puts it into a buffer. Returns the socket-address the "
-              "packet came from. Takes an optional timeout in seconds, after which will return nil.") {
+              "packet came from. Takes an optional timeout in seconds, after which will raise an error.") {
     janet_arity(argc, 3, 4);
     JanetStream *stream = janet_getabstract(argv, 0, &janet_stream_type);
     janet_stream_flags(stream, JANET_STREAM_UDPSERVER | JANET_STREAM_SOCKET);
@@ -822,13 +898,12 @@ JANET_CORE_FN(cfun_stream_recv_from,
     double to = janet_optnumber(argv, argc, 3, INFINITY);
     if (to != INFINITY) janet_addtimeout(to);
     janet_ev_recvfrom(stream, buffer, n, MSG_NOSIGNAL);
-    janet_await();
 }
 
 JANET_CORE_FN(cfun_stream_write,
               "(net/write stream data &opt timeout)",
               "Write data to a stream, suspending the current fiber until the write "
-              "completes. Takes an optional timeout in seconds, after which will return nil. "
+              "completes. Takes an optional timeout in seconds, after which will raise an error. "
               "Returns nil, or raises an error if the write failed.") {
     janet_arity(argc, 2, 3);
     JanetStream *stream = janet_getabstract(argv, 0, &janet_stream_type);
@@ -842,13 +917,12 @@ JANET_CORE_FN(cfun_stream_write,
         if (to != INFINITY) janet_addtimeout(to);
         janet_ev_send_string(stream, bytes.bytes, MSG_NOSIGNAL);
     }
-    janet_await();
 }
 
 JANET_CORE_FN(cfun_stream_send_to,
               "(net/send-to stream dest data &opt timeout)",
               "Writes a datagram to a server stream. dest is a the destination address of the packet. "
-              "Takes an optional timeout in seconds, after which will return nil. "
+              "Takes an optional timeout in seconds, after which will raise an error. "
               "Returns stream.") {
     janet_arity(argc, 3, 4);
     JanetStream *stream = janet_getabstract(argv, 0, &janet_stream_type);
@@ -863,7 +937,6 @@ JANET_CORE_FN(cfun_stream_send_to,
         if (to != INFINITY) janet_addtimeout(to);
         janet_ev_sendto_string(stream, bytes.bytes, dest, MSG_NOSIGNAL);
     }
-    janet_await();
 }
 
 JANET_CORE_FN(cfun_stream_flush,
@@ -897,8 +970,10 @@ static const struct sockopt_type sockopt_type_list[] = {
     { "ip-multicast-ttl", IPPROTO_IP, IP_MULTICAST_TTL, JANET_NUMBER },
     { "ip-add-membership", IPPROTO_IP, IP_ADD_MEMBERSHIP, JANET_POINTER },
     { "ip-drop-membership", IPPROTO_IP, IP_DROP_MEMBERSHIP, JANET_POINTER },
+#ifndef JANET_NO_IPV6
     { "ipv6-join-group", IPPROTO_IPV6, IPV6_JOIN_GROUP, JANET_POINTER },
     { "ipv6-leave-group", IPPROTO_IPV6, IPV6_LEAVE_GROUP, JANET_POINTER },
+#endif
     { NULL, 0, 0, JANET_POINTER }
 };
 
@@ -935,7 +1010,9 @@ JANET_CORE_FN(cfun_net_setsockopt,
     union {
         int v_int;
         struct ip_mreq v_mreq;
+#ifndef JANET_NO_IPV6
         struct ipv6_mreq v_mreq6;
+#endif
     } val;
 
     void *optval = (void *)&val;
@@ -953,12 +1030,14 @@ JANET_CORE_FN(cfun_net_setsockopt,
         val.v_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
         inet_pton(AF_INET, addr, &val.v_mreq.imr_multiaddr.s_addr);
         optlen = sizeof(val.v_mreq);
+#ifndef JANET_NO_IPV6
     } else if (st->optname == IPV6_JOIN_GROUP || st->optname == IPV6_LEAVE_GROUP) {
         const char *addr = janet_getcstring(argv, 2);
         memset(&val.v_mreq6, 0, sizeof val.v_mreq6);
         val.v_mreq6.ipv6mr_interface = 0;
         inet_pton(AF_INET6, addr, &val.v_mreq6.ipv6mr_multiaddr);
         optlen = sizeof(val.v_mreq6);
+#endif
     } else {
         janet_panicf("invalid socket option type");
     }
@@ -967,7 +1046,7 @@ JANET_CORE_FN(cfun_net_setsockopt,
 
     int r = setsockopt((JSock) stream->handle, st->level, st->optname, optval, optlen);
     if (r == -1) {
-        janet_panicf("setsockopt(%q): %s", argv[1], strerror(errno));
+        janet_panicf("setsockopt(%q): %s", argv[1], janet_strerror(errno));
     }
 
     return janet_wrap_nil();

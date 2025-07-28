@@ -50,6 +50,7 @@ for %%f in (src\boot\*.c) do (
 %JANET_LINK% /out:build\janet_boot.exe build\boot\*.obj
 @if errorlevel 1 goto :BUILDFAIL
 build\janet_boot . > build\c\janet.c
+@if errorlevel 1 goto :BUILDFAIL
 
 @rem Build the sources
 %JANET_COMPILE% /Fobuild\janet.obj build\c\janet.c
@@ -59,12 +60,13 @@ build\janet_boot . > build\c\janet.c
 
 @rem Build the resources
 rc /nologo /fobuild\janet_win.res janet_win.rc
+@if errorlevel 1 goto :BUILDFAIL
 
 @rem Link everything to main client
 %JANET_LINK% /out:janet.exe build\janet.obj build\shell.obj build\janet_win.res
 @if errorlevel 1 goto :BUILDFAIL
 
-@rem Build static library (libjanet.a)
+@rem Build static library (libjanet.lib)
 %JANET_LINK_STATIC% /out:build\libjanet.lib build\janet.obj
 @if errorlevel 1 goto :BUILDFAIL
 
@@ -89,9 +91,11 @@ exit /b 0
 
 @rem Clean build artifacts
 :CLEAN
-del *.exe *.lib *.exp
+del *.exe *.lib *.exp *.msi *.wixpdb
 rd /s /q build
-rd /s /q dist
+if exist dist (
+    rd /s /q dist
+)
 exit /b 0
 
 @rem Run tests
@@ -134,11 +138,18 @@ if defined APPVEYOR_REPO_TAG_NAME (
     set RELEASE_VERSION=%JANET_VERSION%
 )
 if defined CI (
-    set WIXBIN="c:\Program Files (x86)\WiX Toolset v3.11\bin\"
+    set WIXBIN="%WIX%bin\"
+    echo WIXBIN = %WIXBIN%
 ) else (
     set WIXBIN=
 )
-%WIXBIN%candle.exe tools\msi\janet.wxs -arch %BUILDARCH% -out build\
+
+set WIXARCH=%BUILDARCH%
+if "%WIXARCH%"=="aarch64" (
+    set WIXARCH=arm64
+)
+
+%WIXBIN%candle.exe tools\msi\janet.wxs -arch %WIXARCH% -out build\
 %WIXBIN%light.exe "-sice:ICE38" -b tools\msi -ext WixUIExtension build\janet.wixobj -out janet-%RELEASE_VERSION%-windows-%BUILDARCH%-installer.msi
 exit /b 0
 

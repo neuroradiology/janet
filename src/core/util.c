@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -79,6 +79,7 @@ const char *const janet_type_names[16] = {
     "pointer"
 };
 
+/* Docstring for signal lists these */
 const char *const janet_signal_names[14] = {
     "ok",
     "error",
@@ -96,6 +97,7 @@ const char *const janet_signal_names[14] = {
     "await"
 };
 
+/* Docstring for fiber/status lists these */
 const char *const janet_status_names[16] = {
     "dead",
     "error",
@@ -115,14 +117,20 @@ const char *const janet_status_names[16] = {
     "alive"
 };
 
+uint32_t janet_hash_mix(uint32_t input, uint32_t more) {
+    uint32_t mix1 = (more + 0x9e3779b9 + (input << 6) + (input >> 2));
+    return input ^ (0x9e3779b9 + (mix1 << 6) + (mix1 >> 2));
+}
+
 #ifndef JANET_PRF
 
 int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
-    if (NULL == str) return 5381;
+    if (NULL == str || len == 0) return 5381;
     const uint8_t *end = str + len;
     uint32_t hash = 5381;
     while (str < end)
         hash = (hash << 5) + hash + *str++;
+    hash = janet_hash_mix(hash, (uint32_t) len);
     return (int32_t) hash;
 }
 
@@ -237,11 +245,6 @@ int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
 }
 
 #endif
-
-uint32_t janet_hash_mix(uint32_t input, uint32_t more) {
-    uint32_t mix1 = (more + 0x9e3779b9 + (input << 6) + (input >> 2));
-    return input ^ (0x9e3779b9 + (mix1 << 6) + (mix1 >> 2));
-}
 
 /* Computes hash of an array of values */
 int32_t janet_array_calchash(const Janet *array, int32_t len) {
@@ -805,6 +808,13 @@ int janet_checkint(Janet x) {
     return janet_checkintrange(dval);
 }
 
+int janet_checkuint(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return janet_checkuintrange(dval);
+}
+
 int janet_checkint64(Janet x) {
     if (!janet_checktype(x, JANET_NUMBER))
         return 0;
@@ -816,7 +826,21 @@ int janet_checkuint64(Janet x) {
     if (!janet_checktype(x, JANET_NUMBER))
         return 0;
     double dval = janet_unwrap_number(x);
-    return dval >= 0 && dval <= JANET_INTMAX_DOUBLE && dval == (uint64_t) dval;
+    return janet_checkuint64range(dval);
+}
+
+int janet_checkint16(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return janet_checkint16range(dval);
+}
+
+int janet_checkuint16(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return janet_checkuint16range(dval);
 }
 
 int janet_checksize(Janet x) {
@@ -946,6 +970,20 @@ int janet_gettime(struct timespec *spec, enum JanetTimeSource source) {
 #endif
 #endif
 
+/* Better strerror (thread-safe if available) */
+const char *janet_strerror(int e) {
+#ifdef JANET_WINDOWS
+    /* Microsoft strerror seems sane here and is thread safe by default */
+    return strerror(e);
+#elif defined(__GLIBC__)
+    /* See https://linux.die.net/man/3/strerror_r */
+    return strerror_r(e, janet_vm.strerror_buf, sizeof(janet_vm.strerror_buf));
+#else
+    strerror_r(e, janet_vm.strerror_buf, sizeof(janet_vm.strerror_buf));
+    return janet_vm.strerror_buf;
+#endif
+}
+
 /* Setting C99 standard makes this not available, but it should
  * work/link properly if we detect a BSD */
 #if defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
@@ -953,6 +991,7 @@ void arc4random_buf(void *buf, size_t nbytes);
 #endif
 
 int janet_cryptorand(uint8_t *out, size_t n) {
+#ifndef JANET_NO_CRYPTORAND
 #ifdef JANET_WINDOWS
     for (size_t i = 0; i < n; i += sizeof(unsigned int)) {
         unsigned int v;
@@ -964,7 +1003,10 @@ int janet_cryptorand(uint8_t *out, size_t n) {
         }
     }
     return 0;
-#elif defined(JANET_LINUX) || defined(JANET_CYGWIN) || ( defined(JANET_APPLE) && !defined(MAC_OS_X_VERSION_10_7) )
+#elif defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
+    arc4random_buf(out, n);
+    return 0;
+#else
     /* We should be able to call getrandom on linux, but it doesn't seem
        to be uniformly supported on linux distros.
        On Mac, arc4random_buf wasn't available on until 10.7.
@@ -986,12 +1028,10 @@ int janet_cryptorand(uint8_t *out, size_t n) {
     }
     RETRY_EINTR(rc, close(randfd));
     return 0;
-#elif defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
-    arc4random_buf(out, n);
-    return 0;
+#endif
 #else
-    (void) n;
     (void) out;
+    (void) n;
     return -1;
 #endif
 }

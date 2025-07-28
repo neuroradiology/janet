@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -39,8 +39,10 @@ static void fiber_reset(JanetFiber *fiber) {
     fiber->env = NULL;
     fiber->last_value = janet_wrap_nil();
 #ifdef JANET_EV
-    fiber->waiting = NULL;
     fiber->sched_id = 0;
+    fiber->ev_callback = NULL;
+    fiber->ev_state = NULL;
+    fiber->ev_stream = NULL;
     fiber->supervisor_channel = NULL;
 #endif
     janet_fiber_set_status(fiber, JANET_STATUS_NEW);
@@ -85,7 +87,6 @@ JanetFiber *janet_fiber_reset(JanetFiber *fiber, JanetFunction *callee, int32_t 
     if (janet_fiber_funcframe(fiber, callee)) return NULL;
     janet_fiber_frame(fiber)->flags |= JANET_STACKFRAME_ENTRANCE;
 #ifdef JANET_EV
-    fiber->waiting = NULL;
     fiber->supervisor_channel = NULL;
 #endif
     return fiber;
@@ -238,8 +239,8 @@ int janet_fiber_funcframe(JanetFiber *fiber, JanetFunction *func) {
                                          fiber->data + tuplehead,
                                          oldtop - tuplehead)
                                      : janet_wrap_tuple(janet_tuple_n(
-                                                 fiber->data + tuplehead,
-                                                 oldtop - tuplehead));
+                                             fiber->data + tuplehead,
+                                             oldtop - tuplehead));
         }
     }
 
@@ -369,8 +370,8 @@ int janet_fiber_funcframe_tail(JanetFiber *fiber, JanetFunction *func) {
                                          fiber->data + tuplehead,
                                          fiber->stacktop - tuplehead)
                                      : janet_wrap_tuple(janet_tuple_n(
-                                                 fiber->data + tuplehead,
-                                                 fiber->stacktop - tuplehead));
+                                             fiber->data + tuplehead,
+                                             fiber->stacktop - tuplehead));
         }
         stacksize = tuplehead - fiber->stackstart + 1;
     } else {
@@ -661,7 +662,7 @@ JANET_CORE_FN(cfun_fiber_can_resume,
 }
 
 JANET_CORE_FN(cfun_fiber_last_value,
-              "(fiber/last-value)",
+              "(fiber/last-value fiber)",
               "Get the last value returned or signaled from the fiber.") {
     janet_fixarity(argc, 1);
     JanetFiber *fiber = janet_getfiber(argv, 0);

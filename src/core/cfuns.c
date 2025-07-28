@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -99,7 +99,7 @@ static JanetSlot opfunction(
 static int can_be_imm(Janet x, int8_t *out) {
     if (!janet_checkint(x)) return 0;
     int32_t integer = janet_unwrap_integer(x);
-    if (integer > 127 || integer < -127) return 0;
+    if (integer > INT8_MAX || integer < INT8_MIN) return 0;
     *out = (int8_t) integer;
     return 1;
 }
@@ -116,12 +116,11 @@ static JanetSlot opreduce(
     JanetSlot *args,
     int op,
     int opim,
-    Janet nullary) {
+    Janet nullary,
+    Janet unary) {
     JanetCompiler *c = opts.compiler;
     int32_t i, len;
     int8_t imm = 0;
-    int neg = opim < 0;
-    if (opim < 0) opim = -opim;
     len = janet_v_count(args);
     JanetSlot t;
     if (len == 0) {
@@ -132,19 +131,19 @@ static JanetSlot opreduce(
         if (op == JOP_SUBTRACT) {
             janetc_emit_ssi(c, JOP_MULTIPLY_IMMEDIATE, t, args[0], -1, 1);
         } else {
-            janetc_emit_sss(c, op, t, janetc_cslot(nullary), args[0], 1);
+            janetc_emit_sss(c, op, t, janetc_cslot(unary), args[0], 1);
         }
         return t;
     }
     t = janetc_gettarget(opts);
     if (opim && can_slot_be_imm(args[1], &imm)) {
-        janetc_emit_ssi(c, opim, t, args[0], neg ? -imm : imm, 1);
+        janetc_emit_ssi(c, opim, t, args[0], imm, 1);
     } else {
         janetc_emit_sss(c, op, t, args[0], args[1], 1);
     }
     for (i = 2; i < len; i++) {
         if (opim && can_slot_be_imm(args[i], &imm)) {
-            janetc_emit_ssi(c, opim, t, t, neg ? -imm : imm, 1);
+            janetc_emit_ssi(c, opim, t, t, imm, 1);
         } else {
             janetc_emit_sss(c, op, t, t, args[i], 1);
         }
@@ -155,7 +154,7 @@ static JanetSlot opreduce(
 /* Function optimizers */
 
 static JanetSlot do_propagate(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_PROPAGATE, 0, janet_wrap_nil());
+    return opreduce(opts, args, JOP_PROPAGATE, 0, janet_wrap_nil(), janet_wrap_nil());
 }
 static JanetSlot do_error(JanetFopts opts, JanetSlot *args) {
     janetc_emit_s(opts.compiler, JOP_ERROR, args[0], 0);
@@ -172,7 +171,7 @@ static JanetSlot do_debug(JanetFopts opts, JanetSlot *args) {
     return t;
 }
 static JanetSlot do_in(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_IN, 0, janet_wrap_nil());
+    return opreduce(opts, args, JOP_IN, 0, janet_wrap_nil(), janet_wrap_nil());
 }
 static JanetSlot do_get(JanetFopts opts, JanetSlot *args) {
     if (janet_v_count(args) == 3) {
@@ -192,20 +191,14 @@ static JanetSlot do_get(JanetFopts opts, JanetSlot *args) {
         c->buffer[label] |= (current - label) << 16;
         return t;
     } else {
-        return opreduce(opts, args, JOP_GET, 0, janet_wrap_nil());
+        return opreduce(opts, args, JOP_GET, 0, janet_wrap_nil(), janet_wrap_nil());
     }
 }
 static JanetSlot do_next(JanetFopts opts, JanetSlot *args) {
     return opfunction(opts, args, JOP_NEXT, janet_wrap_nil());
 }
-static JanetSlot do_modulo(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_MODULO, 0, janet_wrap_nil());
-}
-static JanetSlot do_remainder(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_REMAINDER, 0, janet_wrap_nil());
-}
 static JanetSlot do_cmp(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_COMPARE, 0, janet_wrap_nil());
+    return opreduce(opts, args, JOP_COMPARE, 0, janet_wrap_nil(), janet_wrap_nil());
 }
 static JanetSlot do_put(JanetFopts opts, JanetSlot *args) {
     if (opts.flags & JANET_FOPTS_DROP) {
@@ -262,34 +255,43 @@ static JanetSlot do_apply(JanetFopts opts, JanetSlot *args) {
 /* Variadic operators specialization */
 
 static JanetSlot do_add(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_ADD, JOP_ADD_IMMEDIATE, janet_wrap_integer(0));
+    return opreduce(opts, args, JOP_ADD, JOP_ADD_IMMEDIATE, janet_wrap_integer(0), janet_wrap_integer(0));
 }
 static JanetSlot do_sub(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_SUBTRACT, -JOP_ADD_IMMEDIATE, janet_wrap_integer(0));
+    return opreduce(opts, args, JOP_SUBTRACT, JOP_SUBTRACT_IMMEDIATE, janet_wrap_integer(0), janet_wrap_integer(0));
 }
 static JanetSlot do_mul(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_MULTIPLY, JOP_MULTIPLY_IMMEDIATE, janet_wrap_integer(1));
+    return opreduce(opts, args, JOP_MULTIPLY, JOP_MULTIPLY_IMMEDIATE, janet_wrap_integer(1), janet_wrap_integer(1));
 }
 static JanetSlot do_div(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_DIVIDE, JOP_DIVIDE_IMMEDIATE, janet_wrap_integer(1));
+    return opreduce(opts, args, JOP_DIVIDE, JOP_DIVIDE_IMMEDIATE, janet_wrap_integer(1), janet_wrap_integer(1));
+}
+static JanetSlot do_divf(JanetFopts opts, JanetSlot *args) {
+    return opreduce(opts, args, JOP_DIVIDE_FLOOR, 0, janet_wrap_integer(1), janet_wrap_integer(1));
+}
+static JanetSlot do_modulo(JanetFopts opts, JanetSlot *args) {
+    return opreduce(opts, args, JOP_MODULO, 0, janet_wrap_integer(0), janet_wrap_integer(1));
+}
+static JanetSlot do_remainder(JanetFopts opts, JanetSlot *args) {
+    return opreduce(opts, args, JOP_REMAINDER, 0, janet_wrap_integer(0), janet_wrap_integer(1));
 }
 static JanetSlot do_band(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_BAND, 0, janet_wrap_integer(-1));
+    return opreduce(opts, args, JOP_BAND, 0, janet_wrap_integer(-1), janet_wrap_integer(-1));
 }
 static JanetSlot do_bor(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_BOR, 0, janet_wrap_integer(0));
+    return opreduce(opts, args, JOP_BOR, 0, janet_wrap_integer(0), janet_wrap_integer(0));
 }
 static JanetSlot do_bxor(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_BXOR, 0, janet_wrap_integer(0));
+    return opreduce(opts, args, JOP_BXOR, 0, janet_wrap_integer(0), janet_wrap_integer(0));
 }
 static JanetSlot do_lshift(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_SHIFT_LEFT, JOP_SHIFT_LEFT_IMMEDIATE, janet_wrap_integer(1));
+    return opreduce(opts, args, JOP_SHIFT_LEFT, JOP_SHIFT_LEFT_IMMEDIATE, janet_wrap_integer(1), janet_wrap_integer(1));
 }
 static JanetSlot do_rshift(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_SHIFT_RIGHT, JOP_SHIFT_RIGHT_IMMEDIATE, janet_wrap_integer(1));
+    return opreduce(opts, args, JOP_SHIFT_RIGHT, JOP_SHIFT_RIGHT_IMMEDIATE, janet_wrap_integer(1), janet_wrap_integer(1));
 }
 static JanetSlot do_rshiftu(JanetFopts opts, JanetSlot *args) {
-    return opreduce(opts, args, JOP_SHIFT_RIGHT_UNSIGNED, JOP_SHIFT_RIGHT_UNSIGNED_IMMEDIATE, janet_wrap_integer(1));
+    return opreduce(opts, args, JOP_SHIFT_RIGHT_UNSIGNED, JOP_SHIFT_RIGHT_UNSIGNED_IMMEDIATE, janet_wrap_integer(1), janet_wrap_integer(1));
 }
 static JanetSlot do_bnot(JanetFopts opts, JanetSlot *args) {
     return genericSS(opts, JOP_BNOT, args[0]);
@@ -383,10 +385,11 @@ static const JanetFunOptimizer optimizers[] = {
     {fixarity2, do_propagate},
     {arity2or3, do_get},
     {arity1or2, do_next},
-    {fixarity2, do_modulo},
-    {fixarity2, do_remainder},
+    {NULL, do_modulo},
+    {NULL, do_remainder},
     {fixarity2, do_cmp},
     {fixarity2, do_cancel},
+    {NULL, do_divf}
 };
 
 const JanetFunOptimizer *janetc_funopt(uint32_t flags) {

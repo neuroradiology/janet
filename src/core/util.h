@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <math.h>
 
 #ifdef JANET_EV
 #ifndef JANET_WINDOWS
@@ -49,11 +50,11 @@
 #ifndef JANET_EXIT
 #include <stdio.h>
 #define JANET_EXIT(m) do { \
-    fprintf(stderr, "C runtime error at line %d in file %s: %s\n",\
+    fprintf(stderr, "janet internal error at line %d in file %s: %s\n",\
         __LINE__,\
         __FILE__,\
         (m));\
-    exit(1);\
+    abort();\
 } while (0)
 #endif
 
@@ -80,6 +81,8 @@ void janet_memempty(JanetKV *mem, int32_t count);
 void *janet_memalloc_empty(int32_t count);
 JanetTable *janet_get_core_table(const char *name);
 void janet_def_addflags(JanetFuncDef *def);
+void janet_buffer_dtostr(JanetBuffer *buffer, double x);
+const char *janet_strerror(int e);
 const void *janet_strbinsearch(
     const void *tab,
     size_t tabcount,
@@ -139,7 +142,7 @@ int janet_gettime(struct timespec *spec, enum JanetTimeSource source);
 #define strdup(x) _strdup(x)
 #endif
 
-/* Use LoadLibrary on windows or dlopen on posix to load dynamic libaries
+/* Use LoadLibrary on windows or dlopen on posix to load dynamic libraries
  * with native code. */
 #if defined(JANET_NO_DYNAMIC_MODULES)
 typedef int Clib;
@@ -187,9 +190,6 @@ void janet_lib_debug(JanetTable *env);
 #ifdef JANET_PEG
 void janet_lib_peg(JanetTable *env);
 #endif
-#ifdef JANET_TYPED_ARRAY
-void janet_lib_typed_array(JanetTable *env);
-#endif
 #ifdef JANET_INT_TYPES
 void janet_lib_inttypes(JanetTable *env);
 #endif
@@ -200,7 +200,11 @@ extern const JanetAbstractType janet_address_type;
 #ifdef JANET_EV
 void janet_lib_ev(JanetTable *env);
 void janet_ev_mark(void);
+void janet_async_start_fiber(JanetFiber *fiber, JanetStream *stream, JanetAsyncMode mode, JanetEVCallback callback, void *state);
 int janet_make_pipe(JanetHandle handles[2], int mode);
+#ifdef JANET_FILEWATCH
+void janet_lib_filewatch(JanetTable *env);
+#endif
 #endif
 #ifdef JANET_FFI
 void janet_lib_ffi(JanetTable *env);

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -75,6 +75,7 @@ static const JanetInstructionDef janet_ops[] = {
     {"cmp", JOP_COMPARE},
     {"cncl", JOP_CANCEL},
     {"div", JOP_DIVIDE},
+    {"divf", JOP_DIVIDE_FLOOR},
     {"divim", JOP_DIVIDE_IMMEDIATE},
     {"eq", JOP_EQUALS},
     {"eqim", JOP_EQUALS_IMMEDIATE},
@@ -137,6 +138,7 @@ static const JanetInstructionDef janet_ops[] = {
     {"sru", JOP_SHIFT_RIGHT_UNSIGNED},
     {"sruim", JOP_SHIFT_RIGHT_UNSIGNED_IMMEDIATE},
     {"sub", JOP_SUBTRACT},
+    {"subim", JOP_SUBTRACT_IMMEDIATE},
     {"tcall", JOP_TAILCALL},
     {"tchck", JOP_TYPECHECK}
 };
@@ -558,6 +560,9 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
     x = janet_get1(s, janet_ckeywordv("vararg"));
     if (janet_truthy(x)) def->flags |= JANET_FUNCDEF_FLAG_VARARG;
 
+    /* Initialize slotcount */
+    def->slotcount = !!(def->flags & JANET_FUNCDEF_FLAG_VARARG) + def->arity;
+
     /* Check structarg */
     x = janet_get1(s, janet_ckeywordv("structarg"));
     if (janet_truthy(x)) def->flags |= JANET_FUNCDEF_FLAG_STRUCTARG;
@@ -782,8 +787,9 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
     }
 
     /* Verify the func def */
-    if (janet_verify(def)) {
-        janet_asm_error(&a, "invalid assembly");
+    int verify_status = janet_verify(def);
+    if (verify_status) {
+        janet_asm_errorv(&a, janet_formatc("invalid assembly (%d)", verify_status));
     }
 
     /* Add final flags */

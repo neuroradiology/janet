@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -20,6 +20,9 @@
 
 (import ./helper :prefix "" :exit true)
 (start-suite)
+
+(def janet (dyn :executable))
+(def run (filter next (string/split " " (os/getenv "SUBRUN" ""))))
 
 # OS Date test
 # 719f7ba0c
@@ -93,10 +96,22 @@
   (assert (= (in buf 0) 0) "cryptorand doesn't overwrite buffer")
   (assert (= (length buf) 2) "cryptorand appends to buffer"))
 
+(assert-no-error "realtime clock" (os/clock))
+(assert-no-error "realtime clock" (os/clock nil))
+(assert-no-error "realtime clock" (os/clock nil nil))
+
 # 80db68210
-(assert-no-error (os/clock :realtime) "realtime clock")
-(assert-no-error (os/clock :cputime) "cputime clock")
-(assert-no-error (os/clock :monotonic) "monotonic clock")
+(assert-no-error "realtime clock" (os/clock :realtime))
+(assert-no-error "cputime clock" (os/clock :cputime))
+(assert-no-error "monotonic clock" (os/clock :monotonic))
+
+(assert-no-error "realtime clock double output" (os/clock nil :double))
+(assert-no-error "realtime clock int output" (os/clock nil :int))
+(assert-no-error "realtime clock tuple output" (os/clock nil :tuple))
+
+(assert-error "invalid clock" (os/clock :a))
+(assert-error "invalid output" (os/clock :realtime :b))
+(assert-error "invalid clock and output" (os/clock :a :b))
 
 (def before (os/clock :monotonic))
 (def after (os/clock :monotonic))
@@ -116,18 +131,38 @@
 (assert (= (os/perm-string 8r755) "rwxr-xr-x") "perm 8")
 (assert (= (os/perm-string 8r644) "rw-r--r--") "perm 9")
 
+# Pipes
+(assert-no-error (os/pipe))
+(assert-no-error (os/pipe :RW))
+(assert-no-error (os/pipe :R))
+(assert-no-error (os/pipe :W))
+
 # os/execute with environment variables
 # issue #636 - 7e2c433ab
-(assert (= 0 (os/execute [(dyn :executable) "-e" "(+ 1 2 3)"] :pe
+(assert (= 0 (os/execute [;run janet "-e" "(+ 1 2 3)"] :pe
                          (merge (os/environ) {"HELLO" "WORLD"})))
         "os/execute with env")
 
 # os/execute regressions
 # 427f7c362
 (for i 0 10
-  (assert (= i (os/execute [(dyn :executable) "-e"
+  (assert (= i (os/execute [;run janet "-e"
                             (string/format "(os/exit %d)" i)] :p))
           (string "os/execute " i)))
 
-(end-suite)
+# os/execute IO redirection
+(assert-no-error "IO redirection"
+                 (defn devnull []
+                   (def os (os/which))
+                   (def path (if (or (= os :mingw) (= os :windows))
+                               "NUL"
+                               "/dev/null"))
+                   (os/open path :w))
+                 (with [dn (devnull)]
+                   (os/execute [;run janet
+                                "-e"
+                                "(print :foo) (eprint :bar)"]
+                               :px
+                               {:out dn :err dn})))
 
+(end-suite)

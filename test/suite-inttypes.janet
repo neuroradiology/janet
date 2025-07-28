@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose & contributors
+# Copyright (c) 2025 Calvin Rose & contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -46,6 +46,14 @@
 (assert (= (int/to-number (u64 9007199254740991)) 9007199254740991))
 (assert (= (int/to-number (i64 9007199254740991)) 9007199254740991))
 (assert (= (int/to-number (i64 -9007199254740991)) -9007199254740991))
+
+# New parser
+(assert (= (u64 "123") 123:u) "u64 parsing")
+(assert (= (u64 "0") 0:u) "u64 parsing")
+(assert (= (u64 "0xFFFF_FFFF_FFFF_FFFF") 0xFFFF_FFFF_FFFF_FFFF:u) "u64 parsing")
+(assert (= (i64 "123") 123:s) "s64 parsing")
+(assert (= (i64 "-123") -123:s) "s64 parsing")
+(assert (= (i64 "0") 0:s) "s64 parsing")
 
 (assert-error
   "u64 out of bounds for safe integer"
@@ -126,7 +134,7 @@
   (assert (deep= (int/to-bytes (u64 300) :be buf2)
                  @"abcd\x00\x00\x00\x00\x00\x00\x01\x2C")))
 
-# int/s64 and int/u64 paramater type checking
+# int/s64 and int/u64 parameter type checking
 # 6aea7c7f7
 (assert-error
   "bad value passed to int/to-bytes"
@@ -171,22 +179,44 @@
 (assert (not (even? (int/s64 "-1001"))) "even? 6")
 
 # integer type operations
-(defn modcheck [x y]
-  (assert (= (string (mod x y)) (string (mod (int/s64 x) y)))
-          (string "int/s64 (mod " x " " y ") expected " (mod x y) ", got "
-                  (mod (int/s64 x) y)))
-  (assert (= (string (% x y)) (string (% (int/s64 x) y)))
-          (string "int/s64 (% " x " " y ") expected " (% x y) ", got "
-                  (% (int/s64 x) y))))
+(defn opcheck [int x y]
+  (each op [mod % div]
+    (assert (compare= (op x y) (op (int x) y))
+            (string int " (" op " " x " " y ") expected " (op x y)
+                    ", got " (op (int x) y)))
+    (assert (compare= (op x y) (op x (int y)))
+            (string int " (" op " " x " " y ") expected " (op x y)
+                    ", got " (op x (int y))))
+    (assert (compare= (op x y) (op (int x) (int y)))
+            (string int " (" op " " x " " y ") expected " (op x y)
+                    ", got " (op (int x) (int y))))))
 
-(modcheck 1 2)
-(modcheck 1 3)
-(modcheck 4 2)
-(modcheck 4 1)
-(modcheck 10 3)
-(modcheck 10 -3)
-(modcheck -10 3)
-(modcheck -10 -3)
+(loop [x :in [-5 -3 0 3 5]
+       y :in [-4 -3 3 4]]
+  (opcheck int/s64 x y)
+  (if (and (>= x 0) (>= y 0))
+    (opcheck int/u64 x y)))
+
+(each int [int/s64 int/u64]
+  (each op [% / div]
+    (assert-error "division by zero" (op (int 7) 0))
+    (assert-error "division by zero" (op 7 (int 0)))
+    (assert-error "division by zero" (op (int 7) (int 0)))))
+
+(each int [int/s64 int/u64]
+  (loop [x :in [-5 -3 0 3 5] :when (or (pos? x) (= int int/s64))]
+    # skip check when comparing negative values with unsigned integers.
+    (assert (= (int x) (mod (int x) 0)) (string int " mod 0"))
+    (assert (= (int x) (mod x (int 0))) (string int " mod 0"))
+    (assert (= (int x) (mod (int x) (int 0))) (string int " mod 0"))))
+
+(loop [x :in [-5 -3 0 3 5]]
+  (assert (compare= (bnot x) (bnot (int/s64 x))) "int/s64 bnot"))
+
+(loop [x :range [0 10]]
+  (assert (= (int/u64 "0xFFFF_FFFF_FFFF_FFFF")
+          (bxor (int/u64 x) (bnot (int/u64 x))))
+          "int/u64 bnot"))
 
 # Check for issue #1130
 # 7e65c2bda
@@ -246,13 +276,21 @@
 # compare u64/i64
 (assert (= (compare (u64 1) (i64 2)) -1) "compare 7")
 (assert (= (compare (u64 1) (i64 -1)) +1) "compare 8")
-(assert (= (compare (u64 -1) (i64 -1)) +1) "compare 9")
+(assert (= (compare (u64 0) (i64 -1)) +1) "compare 9")
 
 # compare i64/u64
 (assert (= (compare (i64 1) (u64 2)) -1) "compare 10")
 (assert (= (compare (i64 -1) (u64 1)) -1) "compare 11")
-(assert (= (compare (i64 -1) (u64 -1)) -1) "compare 12")
+(assert (= (compare (i64 -1) (u64 0)) -1) "compare 12")
 
+# off by 1 error in inttypes
+# a3e812b86
+(assert (= (int/s64 "-0x8000_0000_0000_0000")
+           (+ (int/s64 "0x7FFF_FFFF_FFFF_FFFF") 1)) "int types wrap around")
+(assert (= (int/s64 "0x7FFF_FFFF_FFFF_FFFF")
+           (- (int/s64 "-0x8000_0000_0000_0000") 1)) "int types wrap around")
+
+# Issue #1217
+(assert (= (- (int/u64 "0xFFFFFFFF") 1) (int/u64 "0xFFFFFFFE")) "u64 subtract")
 
 (end-suite)
-

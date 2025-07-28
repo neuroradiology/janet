@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -231,7 +231,7 @@ static void delim_error(JanetParser *parser, size_t stack_index, char c, const c
                 janet_buffer_push_u8(buffer, '`');
             }
         }
-        janet_formatb(buffer, " opened at line %d, column %d", s->line, s->column);
+        janet_formatb(buffer, " opened at line %d, column %d", (int32_t) s->line, (int32_t) s->column);
     }
     parser->error = (const char *) janet_string(buffer->data, buffer->count);
     parser->flag |= JANET_PARSER_GENERATED_ERROR;
@@ -259,6 +259,14 @@ static int checkescape(uint8_t c) {
             return '\f';
         case 'v':
             return '\v';
+        case 'a':
+            return '\a';
+        case 'b':
+            return '\b';
+        case '\'':
+            return '\'';
+        case '?':
+            return '?';
         case 'e':
             return 27;
         case '"':
@@ -355,8 +363,7 @@ static int stringend(JanetParser *p, JanetParseState *state) {
         JanetParseState top = p->states[p->statecount - 1];
         int32_t indent_col = (int32_t) top.column - 1;
         uint8_t *r = bufstart, *end = r + buflen;
-        /* Check if there are any characters before the start column -
-         * if so, do not reindent. */
+        /* Unless there are only spaces before EOLs, disable reindenting */
         int reindent = 1;
         while (reindent && (r < end)) {
             if (*r++ == '\n') {
@@ -366,34 +373,36 @@ static int stringend(JanetParser *p, JanetParseState *state) {
                         break;
                     }
                 }
+                if ((r + 1) < end && *r == '\r' && *(r + 1) == '\n') reindent = 1;
             }
         }
-        /* Now reindent if able to, otherwise just drop leading newline. */
-        if (!reindent) {
-            if (buflen > 0 && bufstart[0] == '\n') {
-                buflen--;
-                bufstart++;
-            }
-        } else {
+        /* Now reindent if able */
+        if (reindent) {
             uint8_t *w = bufstart;
             r = bufstart;
             while (r < end) {
                 if (*r == '\n') {
-                    if (r == bufstart) {
-                        /* Skip leading newline */
-                        r++;
-                    } else {
-                        *w++ = *r++;
-                    }
+                    *w++ = *r++;
                     for (int32_t j = 0; (r < end) && (*r != '\n') && (j < indent_col); j++, r++);
+                    if ((r + 1) < end && *r == '\r' && *(r + 1) == '\n') *w++ = *r++;
                 } else {
                     *w++ = *r++;
                 }
             }
             buflen = (int32_t)(w - bufstart);
         }
-        /* Check for trailing newline character so we can remove it */
-        if (buflen > 0 && bufstart[buflen - 1] == '\n') {
+        /* Check for leading EOL so we can remove it */
+        if (buflen > 1 && bufstart[0] == '\r' && bufstart[1] == '\n') { /* Windows EOL */
+            buflen = buflen - 2;
+            bufstart = bufstart + 2;
+        } else if (buflen > 0 && bufstart[0] == '\n') { /* Unix EOL */
+            buflen--;
+            bufstart++;
+        }
+        /* Check for trailing EOL so we can remove it */
+        if (buflen > 1 && bufstart[buflen - 2] == '\r' && bufstart[buflen - 1] == '\n') { /* Windows EOL */
+            buflen = buflen - 2;
+        } else if (buflen > 0 && bufstart[buflen - 1] == '\n') { /* Unix EOL */
             buflen--;
         }
     }
@@ -459,8 +468,13 @@ static int tokenchar(JanetParser *p, JanetParseState *state, uint8_t c) {
             return 0;
         }
         ret = janet_keywordv(p->buf + 1, blen - 1);
+#ifdef JANET_INT_TYPES
+    } else if (start_num && !janet_scan_numeric(p->buf, blen, &ret)) {
+        (void) numval;
+#else
     } else if (start_num && !janet_scan_number(p->buf, blen, &numval)) {
         ret = janet_wrap_number(numval);
+#endif
     } else if (!check_str_const("nil", p->buf, blen)) {
         ret = janet_wrap_nil();
     } else if (!check_str_const("false", p->buf, blen)) {

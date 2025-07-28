@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -34,11 +34,6 @@
 # For undefined behavior sanitizer
 # c876e63
 0xf&1fffFFFF
-
-# off by 1 error in inttypes
-# a3e812b86
-(assert (= (int/s64 "-0x8000_0000_0000_0000")
-           (+ (int/s64 "0x7FFF_FFFF_FFFF_FFFF") 1)) "int types wrap around")
 
 (end-suite)
 

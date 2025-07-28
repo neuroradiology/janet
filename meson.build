@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose and contributors
+# Copyright (c) 2025 Calvin Rose and contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -20,16 +20,34 @@
 
 project('janet', 'c',
   default_options : ['c_std=c99', 'build.c_std=c99', 'b_lundef=false', 'default_library=both'],
-  version : '1.28.0')
+  version : '1.38.0')
 
 # Global settings
 janet_path = join_paths(get_option('prefix'), get_option('libdir'), 'janet')
 header_path = join_paths(get_option('prefix'), get_option('includedir'), 'janet')
 
-# Link math library on all systems
+# Compilers
 cc = meson.get_compiler('c')
+native_cc = meson.get_compiler('c', native : true)
+
+# Native deps
+native_m_dep = native_cc.find_library('m', required : false)
+native_dl_dep = native_cc.find_library('dl', required : false)
+native_android_spawn_dep = native_cc.find_library('android-spawn', required : false)
+native_thread_dep = dependency('threads', native : true)
+
+# Deps
 m_dep = cc.find_library('m', required : false)
 dl_dep = cc.find_library('dl', required : false)
+
+# for MINGW/MSYS2
+native_ws2_dep = native_cc.find_library('ws2_32', required: false)
+native_psapi_dep = native_cc.find_library('psapi', required: false)
+native_wsock_dep = native_cc.find_library('wsock32', required: false)
+ws2_dep = cc.find_library('ws2_32', required: false)
+psapi_dep = cc.find_library('psapi', required: false)
+wsock_dep = cc.find_library('wsock32', required: false)
+
 android_spawn_dep = cc.find_library('android-spawn', required : false)
 thread_dep = dependency('threads')
 
@@ -61,6 +79,7 @@ conf.set('JANET_NO_SOURCEMAPS', not get_option('sourcemaps'))
 conf.set('JANET_NO_ASSEMBLER', not get_option('assembler'))
 conf.set('JANET_NO_PEG', not get_option('peg'))
 conf.set('JANET_NO_NET', not get_option('net'))
+conf.set('JANET_NO_IPV6', not get_option('ipv6'))
 conf.set('JANET_NO_EV', not get_option('ev') or get_option('single_threaded'))
 conf.set('JANET_REDUCED_OS', get_option('reduced_os'))
 conf.set('JANET_NO_INT_TYPES', not get_option('int_types'))
@@ -78,11 +97,16 @@ conf.set('JANET_EV_NO_KQUEUE', not get_option('kqueue'))
 conf.set('JANET_NO_INTERPRETER_INTERRUPT', not get_option('interpreter_interrupt'))
 conf.set('JANET_NO_FFI', not get_option('ffi'))
 conf.set('JANET_NO_FFI_JIT', not get_option('ffi_jit'))
+conf.set('JANET_NO_FILEWATCH', not get_option('filewatch'))
+conf.set('JANET_NO_CRYPTORAND', not get_option('cryptorand'))
 if get_option('os_name') != ''
   conf.set('JANET_OS_NAME', get_option('os_name'))
 endif
 if get_option('arch_name') != ''
   conf.set('JANET_ARCH_NAME', get_option('arch_name'))
+endif
+if get_option('thread_local_prefix') != ''
+  conf.set('JANET_THREAD_LOCAL', get_option('thread_local_prefix'))
 endif
 jconf = configure_file(output : 'janetconf.h',
   configuration : conf)
@@ -120,6 +144,7 @@ core_src = [
   'src/core/ev.c',
   'src/core/ffi.c',
   'src/core/fiber.c',
+  'src/core/filewatch.c',
   'src/core/gc.c',
   'src/core/inttypes.c',
   'src/core/io.c',
@@ -160,16 +185,23 @@ mainclient_src = [
   'src/mainclient/shell.c'
 ]
 
+janet_dependencies = [m_dep, dl_dep, android_spawn_dep, ws2_dep, psapi_dep, wsock_dep]
+janet_native_dependencies = [native_m_dep, native_dl_dep, native_android_spawn_dep, native_ws2_dep, native_psapi_dep, native_wsock_dep]
+if not get_option('single_threaded')
+  janet_dependencies += thread_dep
+  janet_native_dependencies += native_thread_dep
+endif
+
 # Build boot binary
 janet_boot = executable('janet-boot', core_src, boot_src,
   include_directories : incdir,
   c_args : '-DJANET_BOOTSTRAP',
-  dependencies : [m_dep, dl_dep, thread_dep, android_spawn_dep],
+  dependencies : janet_native_dependencies,
   native : true)
 
 # Build janet.c
 janetc = custom_target('janetc',
-  input : [janet_boot],
+  input : [janet_boot, 'src/boot/boot.janet'],
   output : 'janet.c',
   capture : true,
   command : [
@@ -177,30 +209,41 @@ janetc = custom_target('janetc',
     'JANET_PATH', janet_path
   ])
 
-janet_dependencies = [m_dep, dl_dep, android_spawn_dep]
-if not get_option('single_threaded')
-  janet_dependencies += thread_dep
+# Allow building with no shared library
+if cc.has_argument('-fvisibility=hidden')
+  lib_cflags = ['-fvisibility=hidden']
+else
+  lib_cflags = []
 endif
-
-libjanet = library('janet', janetc,
-  include_directories : incdir,
-  dependencies : janet_dependencies,
-  version: meson.project_version(),
-  soversion: version_parts[0] + '.' + version_parts[1],
-  install : true)
-
+if get_option('shared')
+  libjanet = library('janet', janetc,
+    include_directories : incdir,
+    dependencies : janet_dependencies,
+    version: meson.project_version(),
+    soversion: version_parts[0] + '.' + version_parts[1],
+    c_args : lib_cflags,
+    install : true)
 # Extra c flags - adding -fvisibility=hidden matches the Makefile and
 # shaves off about 10k on linux x64, likely similar on other platforms.
-if cc.has_argument('-fvisibility=hidden')
-  extra_cflags = ['-fvisibility=hidden']
+  if cc.has_argument('-fvisibility=hidden')
+    extra_cflags = ['-fvisibility=hidden', '-DJANET_DLL_IMPORT']
+  else
+    extra_cflags = ['-DJANET_DLL_IMPORT']
+  endif
+  janet_mainclient = executable('janet', mainclient_src,
+    include_directories : incdir,
+    dependencies : janet_dependencies,
+    link_with: [libjanet],
+    c_args : extra_cflags,
+    install : true)
 else
-  extra_cflags = []
+  # No shared library
+  janet_mainclient = executable('janet', mainclient_src, janetc,
+    include_directories : incdir,
+    dependencies : janet_dependencies,
+    c_args : lib_cflags,
+    install : true)
 endif
-janet_mainclient = executable('janet', janetc, mainclient_src,
-  include_directories : incdir,
-  dependencies : janet_dependencies,
-  c_args : extra_cflags,
-  install : true)
 
 if meson.is_cross_build()
   native_cc = meson.get_compiler('c', native: true)
@@ -211,7 +254,7 @@ if meson.is_cross_build()
   endif
   janet_nativeclient = executable('janet-native', janetc, mainclient_src,
     include_directories : incdir,
-    dependencies : janet_dependencies,
+    dependencies : janet_native_dependencies,
     c_args : extra_native_cflags,
     native : true)
 else
@@ -231,6 +274,7 @@ test_files = [
   'test/suite-asm.janet',
   'test/suite-boot.janet',
   'test/suite-buffer.janet',
+  'test/suite-bundle.janet',
   'test/suite-capi.janet',
   'test/suite-cfuns.janet',
   'test/suite-compile.janet',
@@ -238,6 +282,7 @@ test_files = [
   'test/suite-debug.janet',
   'test/suite-ev.janet',
   'test/suite-ffi.janet',
+  'test/suite-filewatch.janet',
   'test/suite-inttypes.janet',
   'test/suite-io.janet',
   'test/suite-marsh.janet',
@@ -252,6 +297,7 @@ test_files = [
   'test/suite-struct.janet',
   'test/suite-symcache.janet',
   'test/suite-table.janet',
+  'test/suite-tuple.janet',
   'test/suite-unknown.janet',
   'test/suite-value.janet',
   'test/suite-vm.janet'
@@ -264,14 +310,15 @@ endforeach
 run_target('repl', command : [janet_nativeclient])
 
 # For use as meson subproject (wrap)
-janet_dep = declare_dependency(include_directories : incdir,
-  link_with : libjanet)
-
+if get_option('shared')
+  janet_dep = declare_dependency(include_directories : incdir,
+    link_with : libjanet)
 # pkgconfig
-pkg = import('pkgconfig')
-pkg.generate(libjanet,
-  subdirs: 'janet',
-  description: 'Library for the Janet programming language.')
+  pkg = import('pkgconfig')
+  pkg.generate(libjanet,
+    subdirs: 'janet',
+    description: 'Library for the Janet programming language.')
+endif
 
 # Installation
 install_man('janet.1')
@@ -281,11 +328,12 @@ patched_janet = custom_target('patched-janeth',
   install : true,
   install_dir : join_paths(get_option('includedir'), 'janet'),
   build_by_default : true,
-  output : ['janet.h'],
+  output : ['janet_' + meson.project_version() + '.h'],
   command : [janet_nativeclient, '@INPUT@', '@OUTPUT@'])
 
 # Create a version of the janet.h header that matches what jpm often expects
 if meson.version().version_compare('>=0.61')
-  install_symlink('janet.h', pointing_to: 'janet/janet.h', install_dir: get_option('includedir'))
+  install_symlink('janet.h', pointing_to: 'janet/janet_' + meson.project_version() + '.h', install_dir: get_option('includedir'))
+  install_symlink('janet.h', pointing_to: 'janet_' + meson.project_version() + '.h', install_dir: join_paths(get_option('includedir'), 'janet'))
 endif
 

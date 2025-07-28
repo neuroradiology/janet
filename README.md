@@ -1,4 +1,4 @@
-[![Join the chat](https://badges.gitter.im/janet-language/community.svg)](https://gitter.im/janet-language/community)
+[![Join the chat](https://img.shields.io/badge/zulip-join_chat-brightgreen.svg)](https://janet.zulipchat.com)
 &nbsp;
 [![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/commits/master/freebsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/commits/master/freebsd.yml?)
 [![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/commits/master/openbsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/commits/master/openbsd.yml?)
@@ -17,9 +17,6 @@ There is a REPL for trying out the language, as well as the ability
 to run script files. This client program is separate from the core runtime, so
 Janet can be embedded in other programs. Try Janet in your browser at
 <https://janet-lang.org>.
-
-If you'd like to financially support the ongoing development of Janet, consider
-[sponsoring its primary author](https://github.com/sponsors/bakpakin) through GitHub.
 
 <br>
 
@@ -168,6 +165,21 @@ make install-jpm-git
 
 Find out more about the available make targets by running `make help`.
 
+### Alpine Linux
+
+To build a statically-linked build of Janet, Alpine Linux + MUSL is a good combination. Janet can also
+be built inside a docker container or similar in this manner.
+
+```sh
+docker run -it --rm alpine /bin/ash
+$ apk add make gcc musl-dev git
+$ git clone https://github.com/janet-lang/janet.git
+$ cd janet
+$ make -j10
+$ make test
+$ make install
+```
+
 ### 32-bit Haiku
 
 32-bit Haiku build instructions are the same as the UNIX-like build instructions,
@@ -210,7 +222,7 @@ Alternatively, install the package directly with `pkgin install janet`.
 
 To build an `.msi` installer executable, in addition to the above steps, you will have to:
 
-5. Install, or otherwise add to your PATH the [WiX 3.11 Toolset](https://github.com/wixtoolset/wix3/releases).
+5. Install, or otherwise add to your PATH the [WiX 3.14 Toolset](https://github.com/wixtoolset/wix3/releases).
 6. Run `build_win dist`.
 
 Now you should have an `.msi`. You can run `build_win install` to install the `.msi`, or execute the file itself.
@@ -253,8 +265,10 @@ Emacs, and Atom each have syntax packages for the Janet language, though.
 
 ## Installation
 
-See the [Introduction](https://janet-lang.org/docs/index.html) for more details. If you just want
-to try out the language, you don't need to install anything. You can also move the `janet` executable wherever you want on your system and run it.
+If you just want to try out the language, you don't need to install anything.
+In this case you can also move the `janet` executable wherever you want on
+your system and run it.  However, for a fuller setup, please see the
+[Introduction](https://janet-lang.org/docs/index.html) for more details.
 
 ## Usage
 
@@ -315,8 +329,7 @@ See the [Embedding Section](https://janet-lang.org/capi/embedding.html) on the w
 
 ## Discussion
 
-Feel free to ask questions and join the discussion on the [Janet Gitter channel](https://gitter.im/janet-language/community).
-Gitter provides Matrix and IRC bridges as well.
+Feel free to ask questions and join the discussion on the [Janet Zulip Instance](https://janet.zulipchat.com/)
 
 ## FAQ
 
@@ -383,7 +396,7 @@ Usually, one of a few reasons:
 ### Can I bind to Rust/Zig/Go/Java/Nim/C++/D/Pascal/Fortran/Odin/Jai/(Some new "Systems" Programming Language)?
 
 Probably, if that language has a good interface with C. But the programmer may need to do
-some extra work to map Janet's internal memory model may need some to that of the bound language. Janet
+some extra work to map Janet's internal memory model to that of the bound language. Janet
 also uses `setjmp`/`longjmp` for non-local returns internally. This
 approach is out of favor with many programmers now and doesn't always play well with other languages
 that have exceptions or stack-unwinding.

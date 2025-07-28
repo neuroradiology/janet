@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -50,6 +50,14 @@
 # dacbe29
 (def f (asm (disasm (fn [x] (fn [y] (+ x y))))))
 (assert (= ((f 10) 37) 47) "asm environment tables")
+
+# issue #1424
+(assert-no-error "arity > used slots (issue #1424)"
+                 (asm
+                   (disasm
+                     (fn []
+                       (def foo (fn [one two] one))
+                       (foo 100 200)))))
 
 (end-suite)
 

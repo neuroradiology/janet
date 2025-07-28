@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -59,6 +59,9 @@
 #define JANET_FIBER_EV_FLAG_CANCELED 0x10000
 #define JANET_FIBER_EV_FLAG_SUSPENDED 0x20000
 #define JANET_FIBER_FLAG_ROOT 0x40000
+#define JANET_FIBER_EV_FLAG_IN_FLIGHT 0x1
+
+/* used only on windows, should otherwise be unset */
 
 #define janet_fiber_set_status(f, s) do {\
     (f)->flags &= ~JANET_FIBER_STATUS_MASK;\

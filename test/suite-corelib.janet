@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -30,10 +30,12 @@
 (assert (= 1 (brshift 4 2)) "right shift")
 # unsigned shift
 (assert (= 32768 (brushift 0x80000000 16)) "right shift unsigned 1")
-(assert (= -32768 (brshift 0x80000000 16)) "right shift unsigned 2")
+(assert-error "right shift unsigned 2" (= -32768 (brshift 0x80000000 16)))
+(assert (= -1 (brshift -1 16)) "right shift unsigned 3")
 # non-immediate forms
 (assert (= 32768 (brushift 0x80000000 (+ 0 16))) "right shift unsigned non-immediate")
-(assert (= -32768 (brshift 0x80000000 (+ 0 16))) "right shift non-immediate")
+(assert-error "right shift non-immediate" (= -32768 (brshift 0x80000000 (+ 0 16))))
+(assert (= -1 (brshift -1 (+ 0 16))) "right shift non-immediate 2")
 (assert (= 32768 (blshift 1 (+ 0 15))) "left shift non-immediate")
 # 7e46ead
 (assert (< 1 2 3 4 5 6) "less than integers")
@@ -44,8 +46,35 @@
 (assert (<= 1.0 2.0 3.0 3.0 4.0 5.0 6.0) "less than or equal to reals")
 (assert (>= 6 5 4 4 3 2 1) "greater than or equal to integers")
 (assert (>= 6.0 5.0 4.0 4.0 3.0 2.0 1.0) "greater than or equal to reals")
-(assert (= 7 (% 20 13)) "modulo 1")
-(assert (= -7 (% -20 13)) "modulo 2")
+
+(assert (= 7 (% 20 13)) "rem 1")
+(assert (= -7 (% -20 13)) "rem 2")
+(assert (= 7 (% 20 -13)) "rem 3")
+(assert (= -7 (% -20 -13)) "rem 4")
+(assert (nan? (% 20 0)) "rem 5")
+
+(assert (= 7 (mod 20 13)) "mod 1")
+(assert (= 6 (mod -20 13)) "mod 2")
+(assert (= -6 (mod 20 -13)) "mod 3")
+(assert (= -7 (mod -20 -13)) "mod 4")
+(assert (= 20 (mod 20 0)) "mod 5")
+
+(assert (= 1 (div 20 13)) "div 1")
+(assert (= -2 (div -20 13)) "div 2")
+(assert (= -2 (div 20 -13)) "div 3")
+(assert (= 1 (div -20 -13)) "div 4")
+(assert (= math/inf (div 20 0)) "div 5")
+
+(assert (all = (seq [n :range [0 10]] (mod n 5 3))
+               (seq [n :range [0 10]] (% n 5 3))
+               [0 1 2 0 1 0 1 2 0 1]) "variadic mod")
+
+# linspace range
+(assert (deep= @[0 1 2 3] (range 4)) "range 1")
+(assert (deep= @[0 1 2 3] (range 3.01)) "range 2")
+(assert (deep= @[0 1 2 3] (range 3.999)) "range 3")
+(assert (deep= @[0.8 1.8 2.8 3.8] (range 0.8 3.999)) "range 4")
+(assert (deep= @[0.8 1.8 2.8 3.8] (range 0.8 3.999)) "range 5")
 
 (assert (< 1.0 nil false true
            (fiber/new (fn [] 1))
@@ -136,6 +165,25 @@
 (assert (> (memcmp "123helloabcd" "1234hellaabc" 5 3 4) 0) "memcmp 3")
 (assert-error "invalid offset-a: 1" (memcmp "a" "b" 1 1 0))
 (assert-error "invalid offset-b: 1" (memcmp "a" "b" 1 0 1))
+
+# Range
+# a982f351d
+(assert (deep= (range 10) @[0 1 2 3 4 5 6 7 8 9]) "(range 10)")
+(assert (deep= (range 5 10) @[5 6 7 8 9]) "(range 5 10)")
+(assert (deep= (range 0 16 4) @[0 4 8 12]) "(range 0 16 4)")
+(assert (deep= (range 0 17 4) @[0 4 8 12 16]) "(range 0 17 4)")
+(assert (deep= (range 16 0 -4) @[16 12 8 4]) "(range 16 0 -4)")
+(assert (deep= (range 17 0 -4) @[17 13 9 5 1]) "(range 17 0 -4)")
+(assert-error "large range" (range 0xFFFFFFFFFF))
+
+(assert (= (length (range 10)) 10) "(range 10)")
+(assert (= (length (range -10)) 0) "(range -10)")
+(assert (= (length (range 1 10)) 9) "(range 1 10)")
+
+# iterating over generator
+(assert-no-error "iterate over coro 1" (values (generate [x :range [0 10]] x)))
+(assert-no-error "iterate over coro 2" (keys (generate [x :range [0 10]] x)))
+(assert-no-error "iterate over coro 3" (pairs (generate [x :range [0 10]] x)))
 
 (end-suite)
 

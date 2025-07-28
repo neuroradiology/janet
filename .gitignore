@@ -34,8 +34,11 @@ local
 
 # Common test files I use.
 temp.janet
-temp*.janet
+temp.c
+temp*janet
+temp*.c
 scratch.janet
+scratch.c
 
 # Emscripten
 *.bc
@@ -45,6 +48,8 @@ janet.wasm
 # Generated files
 *.gen.h
 *.gen.c
+*.tmp
+temp.*
 
 # Generate test files
 *.out
@@ -57,6 +62,7 @@ xxd.exe
 # VSCode
 .vs
 .clangd
+.cache
 
 # Swap files
 *.swp
@@ -122,6 +128,9 @@ vgcore.*
 *.idb
 *.pdb
 
+# GGov
+*.gcov
+
 # Kernel Module Compile Results
 *.mod*
 *.cmd
@@ -129,6 +138,9 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Coverage files
+*.cov
 
 # End of https://www.gitignore.io/api/c
 

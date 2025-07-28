@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -75,5 +75,7 @@
 #if !__BSD_VISIBLE && (defined(__DragonFly__) || defined(__FreeBSD__))
 #define __BSD_VISIBLE 1
 #endif
+
+#define _FILE_OFFSET_BITS 64
 
 #endif

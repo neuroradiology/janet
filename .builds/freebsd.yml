@@ -1,4 +1,4 @@
-image: freebsd/12.x
+image: freebsd/14.x
 sources:
 - https://git.sr.ht/~bakpakin/janet
 packages:
@@ -9,3 +9,4 @@ tasks:
     gmake
     gmake test
     sudo gmake install
+    sudo gmake uninstall

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -33,6 +33,7 @@ CLIBS=-lm -lpthread
 JANET_TARGET=build/janet
 JANET_BOOT=build/janet_boot
 JANET_IMPORT_LIB=build/janet.lib
+JANET_LIBRARY_IMPORT_LIB=build/libjanet.lib
 JANET_LIBRARY=build/libjanet.so
 JANET_STATIC_LIBRARY=build/libjanet.a
 JANET_PATH?=$(LIBDIR)/janet
@@ -42,15 +43,20 @@ JANET_DIST_DIR?=janet-dist
 JANET_BOOT_FLAGS:=. JANET_PATH '$(JANET_PATH)'
 JANET_TARGET_OBJECTS=build/janet.o build/shell.o
 JPM_TAG?=master
+SPORK_TAG?=master
+HAS_SHARED?=1
 DEBUGGER=gdb
 SONAME_SETTER=-Wl,-soname,
 
 # For cross compilation
 HOSTCC?=$(CC)
 HOSTAR?=$(AR)
+# Symbols are (optionally) removed later, keep -g as default!
 CFLAGS?=-O2 -g
 LDFLAGS?=-rdynamic
+LIBJANET_LDFLAGS?=$(LD_FLAGS)
 RUN:=$(RUN)
+
 
 COMMON_CFLAGS:=-std=c99 -Wall -Wextra -Isrc/include -Isrc/conf -fvisibility=hidden -fPIC
 BOOT_CFLAGS:=-DJANET_BOOTSTRAP -DJANET_BUILD=$(JANET_BUILD) -O0 $(COMMON_CFLAGS) -g
@@ -89,15 +95,26 @@ endif
 endif
 
 # Mingw
+MINGW_COMPILER=
 ifeq ($(findstring MINGW,$(UNAME)), MINGW)
+	MINGW_COMPILER=gcc
 	CLIBS:=-lws2_32 -lpsapi -lwsock32
 	LDFLAGS:=-Wl,--out-implib,$(JANET_IMPORT_LIB)
+	LIBJANET_LDFLAGS:=-Wl,--out-implib,$(JANET_LIBRARY_IMPORT_LIB)
 	JANET_TARGET:=$(JANET_TARGET).exe
 	JANET_BOOT:=$(JANET_BOOT).exe
+	COMPILER_VERSION:=$(shell $(CC) --version)
+	ifeq ($(findstring clang,$(COMPILER_VERSION)), clang)
+		MINGW_COMPILER=clang
+	endif
 endif
 
+
 $(shell mkdir -p build/core build/c build/boot build/mainclient)
-all: $(JANET_TARGET) $(JANET_LIBRARY) $(JANET_STATIC_LIBRARY) build/janet.h
+all: $(JANET_TARGET) $(JANET_STATIC_LIBRARY) build/janet.h
+ifeq ($(HAS_SHARED), 1)
+all: $(JANET_LIBRARY)
+endif
 
 ######################
 ##### Name Files #####
@@ -130,6 +147,7 @@ JANET_CORE_SOURCES=src/core/abstract.c \
 				   src/core/ev.c \
 				   src/core/ffi.c \
 				   src/core/fiber.c \
+				   src/core/filewatch.c \
 				   src/core/gc.c \
 				   src/core/inttypes.c \
 				   src/core/io.c \
@@ -195,9 +213,14 @@ build/%.bin.o: src/%.c $(JANET_HEADERS) $(JANET_LOCAL_HEADERS) Makefile
 ########################
 
 ifeq ($(UNAME), Darwin)
-SONAME=libjanet.1.28.dylib
+SONAME=libjanet.1.38.dylib
 else
-SONAME=libjanet.so.1.28
+SONAME=libjanet.so.1.38
+endif
+
+ifeq ($(MINGW_COMPILER), clang)
+	SONAME=
+	SONAME_SETTER=
 endif
 
 build/c/shell.c: src/mainclient/shell.c
@@ -219,7 +242,7 @@ $(JANET_TARGET): $(JANET_TARGET_OBJECTS)
 	$(HOSTCC) $(LDFLAGS) $(BUILD_CFLAGS) -o $@ $^ $(CLIBS)
 
 $(JANET_LIBRARY): $(JANET_TARGET_OBJECTS)
-	$(HOSTCC) $(LDFLAGS) $(BUILD_CFLAGS) $(SONAME_SETTER)$(SONAME) -shared -o $@ $^ $(CLIBS)
+	$(HOSTCC) $(LIBJANET_LDFLAGS) $(BUILD_CFLAGS) $(SONAME_SETTER)$(SONAME) -shared -o $@ $^ $(CLIBS)
 
 $(JANET_STATIC_LIBRARY): $(JANET_TARGET_OBJECTS)
 	$(HOSTAR) rcs $@ $^
@@ -262,20 +285,25 @@ dist: build/janet-dist.tar.gz
 
 build/janet-%.tar.gz: $(JANET_TARGET) \
 	build/janet.h \
-	janet.1 LICENSE CONTRIBUTING.md $(JANET_LIBRARY) $(JANET_STATIC_LIBRARY) \
+	janet.1 LICENSE CONTRIBUTING.md $(JANET_STATIC_LIBRARY) \
 	README.md build/c/janet.c build/c/shell.c
 	mkdir -p build/$(JANET_DIST_DIR)/bin
 	cp $(JANET_TARGET) build/$(JANET_DIST_DIR)/bin/
+	strip -x -S 'build/$(JANET_DIST_DIR)/bin/janet'
 	mkdir -p build/$(JANET_DIST_DIR)/include
 	cp build/janet.h build/$(JANET_DIST_DIR)/include/
 	mkdir -p build/$(JANET_DIST_DIR)/lib/
-	cp $(JANET_LIBRARY) $(JANET_STATIC_LIBRARY) build/$(JANET_DIST_DIR)/lib/
+	cp $(JANET_STATIC_LIBRARY) build/$(JANET_DIST_DIR)/lib/
+	cp $(JANET_LIBRARY) build/$(JANET_DIST_DIR)/lib/ || true
 	mkdir -p build/$(JANET_DIST_DIR)/man/man1/
 	cp janet.1 build/$(JANET_DIST_DIR)/man/man1/janet.1
 	mkdir -p build/$(JANET_DIST_DIR)/src/
 	cp build/c/janet.c build/c/shell.c build/$(JANET_DIST_DIR)/src/
 	cp CONTRIBUTING.md LICENSE README.md build/$(JANET_DIST_DIR)/
 	cd build && tar -czvf ../$@ ./$(JANET_DIST_DIR)
+ifeq ($(HAS_SHARED), 1)
+build/janet-%.tar.gz: $(JANET_LIBRARY)
+endif
 
 #########################
 ##### Documentation #####
@@ -308,7 +336,7 @@ build/janet.pc: $(JANET_TARGET)
 install: $(JANET_TARGET) $(JANET_LIBRARY) $(JANET_STATIC_LIBRARY) build/janet.pc build/janet.h
 	mkdir -p '$(DESTDIR)$(BINDIR)'
 	cp $(JANET_TARGET) '$(DESTDIR)$(BINDIR)/janet'
-	strip '$(DESTDIR)$(BINDIR)/janet'
+	strip -x -S '$(DESTDIR)$(BINDIR)/janet'
 	mkdir -p '$(DESTDIR)$(INCLUDEDIR)/janet'
 	cp -r build/janet.h '$(DESTDIR)$(INCLUDEDIR)/janet'
 	ln -sf ./janet/janet.h '$(DESTDIR)$(INCLUDEDIR)/janet.h'
@@ -329,6 +357,7 @@ install: $(JANET_TARGET) $(JANET_LIBRARY) $(JANET_STATIC_LIBRARY) build/janet.pc
 	mkdir -p '$(DESTDIR)$(JANET_PKG_CONFIG_PATH)'
 	cp build/janet.pc '$(DESTDIR)$(JANET_PKG_CONFIG_PATH)/janet.pc'
 	cp '$(JANET_IMPORT_LIB)' '$(DESTDIR)$(LIBDIR)' || echo 'no import lib to install (mingw only)'
+	cp '$(JANET_LIBRARY_IMPORT_LIB)' '$(DESTDIR)$(LIBDIR)' || echo 'no import lib to install (mingw only)'
 	[ -z '$(DESTDIR)' ] && $(LDCONFIG) || echo "You can ignore this error for non-Linux systems or local installs"
 
 install-jpm-git: $(JANET_TARGET)
@@ -342,6 +371,12 @@ install-jpm-git: $(JANET_TARGET)
 		JANET_BINPATH='$(BINDIR)' \
 		JANET_LIBPATH='$(LIBDIR)' \
 		$(RUN) ../../$(JANET_TARGET) ./bootstrap.janet
+
+install-spork-git: $(JANET_TARGET)
+	mkdir -p build
+	rm -rf build/spork
+	git clone --depth=1 --branch='$(SPORK_TAG)' https://github.com/janet-lang/spork.git build/spork
+	$(JANET_TARGET) -e '(bundle/install "build/spork")'
 
 uninstall:
 	-rm '$(DESTDIR)$(BINDIR)/janet'
@@ -357,14 +392,14 @@ uninstall:
 #################
 
 format:
-	tools/format.sh
+	sh tools/format.sh
 
 grammar: build/janet.tmLanguage
 build/janet.tmLanguage: tools/tm_lang_gen.janet $(JANET_TARGET)
 	$(RUN) $(JANET_TARGET) $< > $@
 
 compile-commands:
-	# Requires pip install copmiledb
+	# Requires pip install compiledb
 	compiledb make
 
 clean:

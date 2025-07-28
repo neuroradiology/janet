@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -77,6 +77,56 @@
 (buffer/push-string b5 "456" @"789")
 (assert (= "123456789" (string b5)) "buffer/push-buffer 2")
 
+(def buffer-uint16-be @"")
+(buffer/push-uint16 buffer-uint16-be :be 0x0102)
+(assert (= "\x01\x02" (string buffer-uint16-be)) "buffer/push-uint16 big endian")
+
+(def buffer-uint16-le @"")
+(buffer/push-uint16 buffer-uint16-le :le 0x0102)
+(assert (= "\x02\x01" (string buffer-uint16-le)) "buffer/push-uint16 little endian")
+
+(def buffer-uint16-max @"")
+(buffer/push-uint16 buffer-uint16-max :be 0xFFFF)
+(assert (= "\xff\xff" (string buffer-uint16-max)) "buffer/push-uint16 max")
+(assert-error "too large" (buffer/push-uint16 @"" 0x1FFFF))
+(assert-error "too small" (buffer/push-uint16 @"" -0x1))
+
+(def buffer-uint32-be @"")
+(buffer/push-uint32 buffer-uint32-be :be 0x01020304)
+(assert (= "\x01\x02\x03\x04" (string buffer-uint32-be)) "buffer/push-uint32 big endian")
+
+(def buffer-uint32-le @"")
+(buffer/push-uint32 buffer-uint32-le :le 0x01020304)
+(assert (= "\x04\x03\x02\x01" (string buffer-uint32-le)) "buffer/push-uint32 little endian")
+
+(def buffer-uint32-max @"")
+(buffer/push-uint32 buffer-uint32-max :be 0xFFFFFFFF)
+(assert (= "\xff\xff\xff\xff" (string buffer-uint32-max)) "buffer/push-uint32 max")
+
+(def buffer-float32-be @"")
+(buffer/push-float32 buffer-float32-be :be 1.234)
+(assert (= "\x3f\x9d\xf3\xb6" (string buffer-float32-be)) "buffer/push-float32 big endian")
+
+(def buffer-float32-le @"")
+(buffer/push-float32 buffer-float32-le :le 1.234)
+(assert (= "\xb6\xf3\x9d\x3f" (string buffer-float32-le)) "buffer/push-float32 little endian")
+
+(def buffer-float64-be @"")
+(buffer/push-float64 buffer-float64-be :be 1.234)
+(assert (= "\x3f\xf3\xbe\x76\xc8\xb4\x39\x58" (string buffer-float64-be)) "buffer/push-float64 big endian")
+
+(def buffer-float64-le @"")
+(buffer/push-float64 buffer-float64-le :le 1.234)
+(assert (= "\x58\x39\xb4\xc8\x76\xbe\xf3\x3f" (string buffer-float64-le)) "buffer/push-float64 little endian")
+
+# Buffer from bytes
+(assert (deep= @"" (buffer/from-bytes)) "buffer/from-bytes 1")
+(assert (deep= @"ABC" (buffer/from-bytes 65 66 67)) "buffer/from-bytes 2")
+(assert (deep= @"0123456789" (buffer/from-bytes ;(range 48 58))) "buffer/from-bytes 3")
+(assert (= 0 (length (buffer/from-bytes))) "buffer/from-bytes 4")
+(assert (= 5 (length (buffer/from-bytes ;(range 5)))) "buffer/from-bytes 5")
+(assert-error "bad slot #1, expected 32 bit signed integer" (buffer/from-bytes :abc))
+
 # some tests for buffer/format
 # 029394d
 (assert (= (string (buffer/format @"" "pi = %6.3f" math/pi)) "pi =  3.142")
@@ -103,6 +153,7 @@
 (assert (deep= @"bcde" (buffer/blit @"" a -1 1 5)) "buffer/blit 3")
 (assert (deep= @"cde" (buffer/blit @"" a -1 2 5)) "buffer/blit 4")
 (assert (deep= @"de" (buffer/blit @"" a -1 3 5)) "buffer/blit 5")
+(assert (deep= @"de" (buffer/blit @"" a nil 3 5)) "buffer/blit 6")
 
 # buffer/push-at
 # c55d93512
@@ -113,8 +164,20 @@
 (assert (deep= @"abc423" (buffer/push-at @"abc123" 3 "4"))
         "buffer/push-at 3")
 
-# 4782a76
-(assert (= 10 (do (var x 10) (def y x) (++ x) y)) "no invalid aliasing")
+# buffer/format-at
+(def start-buf (buffer/new-filled 100 (chr "x")))
+(buffer/format-at start-buf 50 "aa%dbb" 32)
+(assert (= (string start-buf) (string (string/repeat "x" 50) "aa32bb"  (string/repeat "x" 44)))
+        "buffer/format-at 1")
+(assert
+  (deep=
+    (buffer/format @"" "%j" [1 2 3 :a :b :c])
+    (buffer/format-at @"" 0 "%j" [1 2 3 :a :b :c]))
+  "buffer/format-at empty buffer")
+(def buf @"xxxyyy")
+(buffer/format-at buf -4 "xxx")
+(assert (= (string buf) "xxxxxx") "buffer/format-at negative index")
+(assert-error "expected index at to be in range [0, 0), got 1" (buffer/format-at @"" 1 "abc"))
 
 (end-suite)
 

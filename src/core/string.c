@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -71,10 +71,10 @@ int janet_string_compare(const uint8_t *lhs, const uint8_t *rhs) {
 int janet_string_equalconst(const uint8_t *lhs, const uint8_t *rhs, int32_t rlen, int32_t rhash) {
     int32_t lhash = janet_string_hash(lhs);
     int32_t llen = janet_string_length(lhs);
-    if (lhs == rhs)
-        return 1;
     if (lhash != rhash || llen != rlen)
         return 0;
+    if (lhs == rhs)
+        return 1;
     return !memcmp(lhs, rhs, rlen);
 }
 
@@ -175,8 +175,9 @@ JANET_CORE_FN(cfun_string_slice,
               "Returns a substring from a byte sequence. The substring is from "
               "index `start` inclusive to index `end`, exclusive. All indexing "
               "is from 0. `start` and `end` can also be negative to indicate indexing "
-              "from the end of the string. Note that index -1 is synonymous with "
-              "index `(length bytes)` to allow a full negative slice range. ") {
+              "from the end of the string. Note that if `start` is negative it is "
+              "exclusive, and if `end` is negative it is inclusive, to allow a full "
+              "negative slice range.") {
     JanetByteView view = janet_getbytes(argv, 0);
     JanetRange range = janet_getslice(argc, argv);
     return janet_stringv(view.bytes + range.start, range.end - range.start);
@@ -548,12 +549,12 @@ JANET_CORE_FN(cfun_string_format,
               "- `a`, `A`: floating point number, formatted as a hexadecimal number.\n"
               "- `s`: formatted as a string, precision indicates padding and maximum length.\n"
               "- `t`: emit the type of the given value.\n"
-              "- `v`: format with (describe x)"
-              "- `V`: format with (string x)"
+              "- `v`: format with (describe x)\n"
+              "- `V`: format with (string x)\n"
               "- `j`: format to jdn (Janet data notation).\n"
               "\n"
               "The following conversion specifiers are used for \"pretty-printing\", where the upper-case "
-              "variants generate colored output. These speficiers can take a precision "
+              "variants generate colored output. These specifiers can take a precision "
               "argument to specify the maximum nesting depth to print.\n"
               "- `p`, `P`: pretty format, truncating if necessary\n"
               "- `m`, `M`: pretty format without truncating.\n"

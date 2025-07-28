@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -291,6 +291,9 @@
                  [1 6 3 'y]
                  [2 6 4 'z]])
         "arg & inner symbolmap")
+
+# 4782a76
+(assert (= 10 (do (var x 10) (def y x) (++ x) y)) "no invalid aliasing")
 
 (end-suite)
 

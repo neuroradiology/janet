@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -198,5 +198,9 @@
 
 (assert (= (test) '(1 ())) "issue #919")
 
-(end-suite)
+# Regression #1327
+(def x "A")
+(def x (if (= nil x) "B" x))
+(assert (= x "A"))
 
+(end-suite)

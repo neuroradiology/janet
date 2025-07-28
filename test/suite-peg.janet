@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -263,6 +263,9 @@
 (marshpeg '(if-not "abcdf" 123))
 (marshpeg ~(cmt "abcdf" ,identity))
 (marshpeg '(group "abc"))
+(marshpeg '(sub "abcdf" "abc"))
+(marshpeg '(* (sub 1 1)))
+(marshpeg '(split "," (+ "a" "b" "c")))
 
 # Peg swallowing errors
 # 159651117
@@ -307,12 +310,12 @@
 (check-deep '(uint 2) "\xff\x7f" @[0x7fff])
 (check-deep '(uint-be 2) "\x7f\xff" @[0x7fff])
 (check-deep '(uint-be 2) "\x7f\xff" @[0x7fff])
-(check-deep '(uint 8) "\xff\x7f\x00\x00\x00\x00\x00\x00"
-            @[(int/u64 0x7fff)])
-(check-deep '(int 8) "\xff\x7f\x00\x00\x00\x00\x00\x00"
-            @[(int/s64 0x7fff)])
-(check-deep '(uint 7) "\xff\x7f\x00\x00\x00\x00\x00" @[(int/u64 0x7fff)])
-(check-deep '(int 7) "\xff\x7f\x00\x00\x00\x00\x00" @[(int/s64 0x7fff)])
+(when-let [u64 int/u64
+           i64 int/s64]
+  (check-deep '(uint 8) "\xff\x7f\x00\x00\x00\x00\x00\x00" @[(u64 0x7fff)])
+  (check-deep '(int 8) "\xff\x7f\x00\x00\x00\x00\x00\x00" @[(i64 0x7fff)])
+  (check-deep '(uint 7) "\xff\x7f\x00\x00\x00\x00\x00" @[(u64 0x7fff)])
+  (check-deep '(int 7) "\xff\x7f\x00\x00\x00\x00\x00" @[(i64 0x7fff)]))
 
 (check-deep '(* (int 2) -1) "123" nil)
 
@@ -367,7 +370,7 @@
                  (set "!$%&*+-./:<?=>@^_|"))
     :token (some :symchars)
     :hex (range "09" "af" "AF")
-    :escape (* "\\" (+ (set "ntrvzf0e\"\\")
+    :escape (* "\\" (+ (set `"'0?\abefnrtvz`)
                        (* "x" :hex :hex)
                        (error (constant "bad hex escape"))))
     :comment (/ '(* "#" (any (if-not (+ "\n" -1) 1))) (constant :comment))
@@ -489,7 +492,7 @@
       # header, followed by body, and drop the :header-len capture
       :packet (/ (* :packet-header :packet-body) ,|$1)
 
-      # any exact seqence of packets (no extra characters)
+      # any exact sequence of packets (no extra characters)
       :main (* (any :packet) -1)}))
 
 (assert (deep= @["a" "bb" "ccc"] (peg/match peg2 "1:a2:bb3:ccc"))
@@ -659,6 +662,178 @@
 (assert (deep=
   (peg/match '(if (not (* (constant 7) "a")) "hello") "hello")
   @[]) "peg if not")
+
+(defn test [name peg input expected]
+  (assert-no-error "compile peg" (peg/compile peg))
+  (assert-no-error "marshal/unmarshal peg" (-> peg marshal unmarshal))
+  (assert (deep= (peg/match peg input) expected) name))
+
+(test "sub: matches the same input twice"
+  ~(sub "abcd" "abc")
+  "abcdef"
+  @[])
+
+(test "sub: second pattern cannot match more than the first pattern"
+  ~(sub "abcd" "abcde")
+  "abcdef"
+  nil)
+
+(test "sub: fails if first pattern fails"
+  ~(sub "x" "abc")
+  "abcdef"
+  nil)
+
+(test "sub: fails if second pattern fails"
+  ~(sub "abc" "x")
+  "abcdef"
+  nil)
+
+(test "sub: keeps captures from both patterns"
+  ~(sub '"abcd" '"abc")
+  "abcdef"
+  @["abcd" "abc"])
+
+(test "sub: second pattern can reference captures from first"
+  ~(* (constant 5 :tag) (sub (capture "abc" :tag) (backref :tag)))
+  "abcdef"
+  @[5 "abc" "abc"])
+
+(test "sub: second pattern can't see past what the first pattern matches"
+  ~(sub "abc" (* "abc" -1))
+  "abcdef"
+  @[])
+
+(test "sub: positions inside second match are still relative to the entire input"
+  ~(* "one\ntw" (sub "o" (* ($) (line) (column))))
+  "one\ntwo\nthree\n"
+  @[6 2 3])
+
+(test "sub: advances to the end of the first pattern's match"
+  ~(* (sub "abc" "ab") "d")
+  "abcdef"
+  @[])
+
+(test "til: basic matching"
+  ~(til "d" "abc")
+  "abcdef"
+  @[])
+
+(test "til: second pattern can't see past the first occurrence of first pattern"
+  ~(til "d" (* "abc" -1))
+  "abcdef"
+  @[])
+
+(test "til: fails if first pattern fails"
+  ~(til "x" "abc")
+  "abcdef"
+  nil)
+
+(test "til: fails if second pattern fails"
+  ~(til "abc" "x")
+  "abcdef"
+  nil)
+
+(test "til: discards captures from initial pattern"
+  ~(til '"d" '"abc")
+  "abcdef"
+  @["abc"])
+
+(test "til: positions inside second match are still relative to the entire input"
+  ~(* "one\ntw" (til 0 (* ($) (line) (column))))
+  "one\ntwo\nthree\n"
+  @[6 2 3])
+
+(test "til: advances to the end of the first pattern's first occurrence"
+  ~(* (til "d" "ab") "e")
+  "abcdef"
+  @[])
+
+(test "split: basic functionality"
+  ~(split "," '1)
+  "a,b,c"
+  @["a" "b" "c"])
+
+(test "split: drops captures from separator pattern"
+  ~(split '"," '1)
+  "a,b,c"
+  @["a" "b" "c"])
+
+(test "split: can match empty subpatterns"
+  ~(split "," ':w*)
+  ",a,,bar,,,c,,"
+  @["" "a" "" "bar" "" "" "c" "" ""])
+
+(test "split: subpattern is limited to only text before the separator"
+  ~(split "," '(to -1))
+  "a,,bar,c"
+  @["a" "" "bar" "c"])
+
+(test "split: fails if any subpattern fails"
+  ~(split "," '"a")
+  "a,a,b"
+  nil)
+
+(test "split: separator does not have to match anything"
+  ~(split "x" '(to -1))
+  "a,a,b"
+  @["a,a,b"])
+
+(test "split: always consumes entire input"
+  ~(split 1 '"")
+  "abc"
+  @["" "" "" ""])
+
+(test "split: separator can be an arbitrary PEG"
+  ~(split :s+ '(to -1))
+  "a   b      c"
+  @["a" "b" "c"])
+
+(test "split: does not advance past the end of the input"
+  ~(* (split "," ':w+) 0)
+  "a,b,c"
+  @["a" "b" "c"])
+
+(test "nth 1"
+  ~{:prefix (number :d+ nil :n)
+    :word '(lenprefix (-> :n) :w)
+    :main (some (nth 1 (* :prefix ":" :word)))}
+  "5:apple6:banana6:cherry"
+  @["apple" "banana" "cherry"])
+
+(test "only-tags 1"
+  ~{:prefix (number :d+ nil :n)
+    :word (capture (lenprefix (-> :n) :w) :W)
+    :main (some (* (only-tags (* :prefix ":" :word)) (-> :W)))}
+  "5:apple6:banana6:cherry"
+  @["apple" "banana" "cherry"])
+
+# Issue #1539 - make sure split with "" doesn't infinite loop/oom
+(test "issue 1539"
+      ~(split "" (capture (to -1)))
+      "hello there friends"
+      nil)
+
+(test "issue 1539 pt. 2"
+  ~(split "," (capture 0))
+  "abc123,,,,"
+  @["" "" "" "" ""])
+
+# Issue #1549 - allow buffers as peg literals
+(test "issue 1549"
+      ''@"abc123"
+      "abc123"
+      @["abc123"])
+
+# Issue 1554 - 0-width match termination behavior
+(test "issue 1554 case 1" '(any (> '1)) "abc" @[])
+(test "issue 1554 case 2" '(any (? (> '1))) "abc" @[])
+(test "issue 1554 case 3" '(any (> (? '1))) "abc" @[])
+(test "issue 1554 case 4" '(* "a" (> '1)) "abc" @["b"])
+(test "issue 1554 case 5" '(* "a" (? (> '1))) "abc" @["b"])
+(test "issue 1554 case 6" '(* "a" (> (? '1))) "abc" @["b"])
+(test "issue 1554 case 7" '(between 0 2 (> '1)) "abc" @["a" "a"])
+(test "issue 1554 case 8" '(between 2 3 (? (> '1))) "abc" @["a" "a" "a"])
+(test "issue 1554 case 9" '(between 0 0 (> (? '1))) "abc" @[])
 
 (end-suite)
 

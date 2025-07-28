@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -67,7 +67,7 @@ static JanetTable *janet_table_init_impl(JanetTable *table, int32_t capacity, in
     return table;
 }
 
-/* Initialize a table (for use withs scratch memory) */
+/* Initialize a table (for use with scratch memory) */
 JanetTable *janet_table_init(JanetTable *table, int32_t capacity) {
     return janet_table_init_impl(table, capacity, 1);
 }
@@ -87,8 +87,24 @@ void janet_table_deinit(JanetTable *table) {
 }
 
 /* Create a new table */
+
 JanetTable *janet_table(int32_t capacity) {
     JanetTable *table = janet_gcalloc(JANET_MEMORY_TABLE, sizeof(JanetTable));
+    return janet_table_init_impl(table, capacity, 0);
+}
+
+JanetTable *janet_table_weakk(int32_t capacity) {
+    JanetTable *table = janet_gcalloc(JANET_MEMORY_TABLE_WEAKK, sizeof(JanetTable));
+    return janet_table_init_impl(table, capacity, 0);
+}
+
+JanetTable *janet_table_weakv(int32_t capacity) {
+    JanetTable *table = janet_gcalloc(JANET_MEMORY_TABLE_WEAKV, sizeof(JanetTable));
+    return janet_table_init_impl(table, capacity, 0);
+}
+
+JanetTable *janet_table_weakkv(int32_t capacity) {
+    JanetTable *table = janet_gcalloc(JANET_MEMORY_TABLE_WEAKKV, sizeof(JanetTable));
     return janet_table_init_impl(table, capacity, 0);
 }
 
@@ -111,12 +127,11 @@ static void janet_table_rehash(JanetTable *t, int32_t size) {
             JANET_OUT_OF_MEMORY;
         }
     }
-    int32_t i, oldcapacity;
-    oldcapacity = t->capacity;
+    int32_t oldcapacity = t->capacity;
     t->data = newdata;
     t->capacity = size;
     t->deleted = 0;
-    for (i = 0; i < oldcapacity; i++) {
+    for (int32_t i = 0; i < oldcapacity; i++) {
         JanetKV *kv = olddata + i;
         if (!janet_checktype(kv->key, JANET_NIL)) {
             JanetKV *newkv = janet_table_find(t, kv->key);
@@ -298,10 +313,38 @@ JANET_CORE_FN(cfun_table_new,
               "Creates a new empty table with pre-allocated memory "
               "for `capacity` entries. This means that if one knows the number of "
               "entries going into a table on creation, extra memory allocation "
-              "can be avoided. Returns the new table.") {
+              "can be avoided. "
+              "Returns the new table.") {
     janet_fixarity(argc, 1);
     int32_t cap = janet_getnat(argv, 0);
     return janet_wrap_table(janet_table(cap));
+}
+
+JANET_CORE_FN(cfun_table_weak,
+              "(table/weak capacity)",
+              "Creates a new empty table with weak references to keys and values. Similar to `table/new`. "
+              "Returns the new table.") {
+    janet_fixarity(argc, 1);
+    int32_t cap = janet_getnat(argv, 0);
+    return janet_wrap_table(janet_table_weakkv(cap));
+}
+
+JANET_CORE_FN(cfun_table_weak_keys,
+              "(table/weak-keys capacity)",
+              "Creates a new empty table with weak references to keys and normal references to values. Similar to `table/new`. "
+              "Returns the new table.") {
+    janet_fixarity(argc, 1);
+    int32_t cap = janet_getnat(argv, 0);
+    return janet_wrap_table(janet_table_weakk(cap));
+}
+
+JANET_CORE_FN(cfun_table_weak_values,
+              "(table/weak-values capacity)",
+              "Creates a new empty table with normal references to keys and weak references to values. Similar to `table/new`. "
+              "Returns the new table.") {
+    janet_fixarity(argc, 1);
+    int32_t cap = janet_getnat(argv, 0);
+    return janet_wrap_table(janet_table_weakv(cap));
 }
 
 JANET_CORE_FN(cfun_table_getproto,
@@ -329,12 +372,14 @@ JANET_CORE_FN(cfun_table_setproto,
 }
 
 JANET_CORE_FN(cfun_table_tostruct,
-              "(table/to-struct tab)",
-              "Convert a table to a struct. Returns a new struct. This function "
-              "does not take into account prototype tables.") {
-    janet_fixarity(argc, 1);
+              "(table/to-struct tab &opt proto)",
+              "Convert a table to a struct. Returns a new struct.") {
+    janet_arity(argc, 1, 2);
     JanetTable *t = janet_gettable(argv, 0);
-    return janet_wrap_struct(janet_table_to_struct(t));
+    JanetStruct proto = janet_optstruct(argv, argc, 1, NULL);
+    JanetStruct st = janet_table_to_struct(t);
+    janet_struct_proto(st) = proto;
+    return janet_wrap_struct(st);
 }
 
 JANET_CORE_FN(cfun_table_rawget,
@@ -377,6 +422,9 @@ JANET_CORE_FN(cfun_table_proto_flatten,
 void janet_lib_table(JanetTable *env) {
     JanetRegExt table_cfuns[] = {
         JANET_CORE_REG("table/new", cfun_table_new),
+        JANET_CORE_REG("table/weak", cfun_table_weak),
+        JANET_CORE_REG("table/weak-keys", cfun_table_weak_keys),
+        JANET_CORE_REG("table/weak-values", cfun_table_weak_values),
         JANET_CORE_REG("table/to-struct", cfun_table_tostruct),
         JANET_CORE_REG("table/getproto", cfun_table_getproto),
         JANET_CORE_REG("table/setproto", cfun_table_setproto),

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -746,12 +746,14 @@ static int macroexpand1(
     int lock = janet_gclock();
     Janet mf_kw = janet_ckeywordv("macro-form");
     janet_table_put(c->env, mf_kw, x);
+    Janet ml_kw = janet_ckeywordv("macro-lints");
+    if (c->lints) {
+        janet_table_put(c->env, ml_kw, janet_wrap_array(c->lints));
+    }
     Janet tempOut;
     JanetSignal status = janet_continue(fiberp, janet_wrap_nil(), &tempOut);
     janet_table_put(c->env, mf_kw, janet_wrap_nil());
-    if (c->lints) {
-        janet_table_put(c->env, janet_ckeywordv("macro-lints"), janet_wrap_array(c->lints));
-    }
+    janet_table_put(c->env, ml_kw, janet_wrap_nil());
     janet_gcunlock(lock);
     if (status != JANET_SIGNAL_OK) {
         const uint8_t *es = janet_formatc("(macro) %V", tempOut);
@@ -932,7 +934,7 @@ JanetFuncDef *janetc_pop_funcdef(JanetCompiler *c) {
         int32_t slotchunks = (def->slotcount + 31) >> 5;
         /* numchunks is min of slotchunks and scope->ua.count */
         int32_t numchunks = slotchunks > scope->ua.count ? scope->ua.count : slotchunks;
-        uint32_t *chunks = janet_calloc(sizeof(uint32_t), slotchunks);
+        uint32_t *chunks = janet_calloc(slotchunks, sizeof(uint32_t));
         if (NULL == chunks) {
             JANET_OUT_OF_MEMORY;
         }
@@ -1054,7 +1056,7 @@ JanetCompileResult janet_compile_lint(Janet source,
 
     if (c.result.status == JANET_COMPILE_OK) {
         JanetFuncDef *def = janetc_pop_funcdef(&c);
-        def->name = janet_cstring("_thunk");
+        def->name = janet_cstring("thunk");
         janet_def_addflags(def);
         c.result.funcdef = def;
     } else {

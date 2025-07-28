@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -135,8 +135,7 @@ void janet_buffer_extra(JanetBuffer *buffer, int32_t n) {
 
 /* Push a cstring to buffer */
 void janet_buffer_push_cstring(JanetBuffer *buffer, const char *cstring) {
-    int32_t len = 0;
-    while (cstring[len]) ++len;
+    int32_t len = (int32_t) strlen(cstring);
     janet_buffer_push_bytes(buffer, (const uint8_t *) cstring, len);
 }
 
@@ -218,6 +217,20 @@ JANET_CORE_FN(cfun_buffer_new_filled,
     if (buffer->data && count > 0)
         memset(buffer->data, byte, count);
     buffer->count = count;
+    return janet_wrap_buffer(buffer);
+}
+
+JANET_CORE_FN(cfun_buffer_frombytes,
+              "(buffer/from-bytes & byte-vals)",
+              "Creates a buffer from integer parameters with byte values. All integers "
+              "will be coerced to the range of 1 byte 0-255.") {
+    int32_t i;
+    JanetBuffer *buffer = janet_buffer(argc);
+    for (i = 0; i < argc; i++) {
+        int32_t c = janet_getinteger(argv, i);
+        buffer->data[i] = c & 0xFF;
+    }
+    buffer->count = argc;
     return janet_wrap_buffer(buffer);
 }
 
@@ -304,6 +317,133 @@ JANET_CORE_FN(cfun_buffer_chars,
         }
         janet_buffer_push_bytes(buffer, view.bytes, view.len);
     }
+    return argv[0];
+}
+
+static int should_reverse_bytes(const Janet *argv, int32_t argc) {
+    JanetKeyword order_kw = janet_getkeyword(argv, argc);
+    if (!janet_cstrcmp(order_kw, "le")) {
+#if JANET_BIG_ENDIAN
+        return 1;
+#endif
+    } else if (!janet_cstrcmp(order_kw, "be")) {
+#if JANET_LITTLE_ENDIAN
+        return 1;
+#endif
+    } else if (!janet_cstrcmp(order_kw, "native")) {
+        return 0;
+    } else {
+        janet_panicf("expected endianness :le, :be or :native, got %v", argv[1]);
+    }
+    return 0;
+}
+
+static void reverse_u32(uint8_t bytes[4]) {
+    uint8_t temp;
+    temp = bytes[3];
+    bytes[3] = bytes[0];
+    bytes[0] = temp;
+    temp = bytes[2];
+    bytes[2] = bytes[1];
+    bytes[1] = temp;
+}
+
+static void reverse_u64(uint8_t bytes[8]) {
+    uint8_t temp;
+    temp = bytes[7];
+    bytes[7] = bytes[0];
+    bytes[0] = temp;
+    temp = bytes[6];
+    bytes[6] = bytes[1];
+    bytes[1] = temp;
+    temp = bytes[5];
+    bytes[5] = bytes[2];
+    bytes[2] = temp;
+    temp = bytes[4];
+    bytes[4] = bytes[3];
+    bytes[3] = temp;
+}
+
+JANET_CORE_FN(cfun_buffer_push_uint16,
+              "(buffer/push-uint16 buffer order data)",
+              "Push a 16 bit unsigned integer data onto the end of the buffer. "
+              "Returns the modified buffer.") {
+    janet_fixarity(argc, 3);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    int reverse = should_reverse_bytes(argv, 1);
+    uint16_t data = janet_getuinteger16(argv, 2);
+    uint8_t bytes[sizeof(data)];
+    memcpy(bytes, &data, sizeof(bytes));
+    if (reverse) {
+        uint8_t temp = bytes[1];
+        bytes[1] = bytes[0];
+        bytes[0] = temp;
+    }
+    janet_buffer_push_bytes(buffer, bytes, sizeof(bytes));
+    return argv[0];
+}
+
+JANET_CORE_FN(cfun_buffer_push_uint32,
+              "(buffer/push-uint32 buffer order data)",
+              "Push a 32 bit unsigned integer data onto the end of the buffer. "
+              "Returns the modified buffer.") {
+    janet_fixarity(argc, 3);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    int reverse = should_reverse_bytes(argv, 1);
+    uint32_t data = janet_getuinteger(argv, 2);
+    uint8_t bytes[sizeof(data)];
+    memcpy(bytes, &data, sizeof(bytes));
+    if (reverse)
+        reverse_u32(bytes);
+    janet_buffer_push_bytes(buffer, bytes, sizeof(bytes));
+    return argv[0];
+}
+
+JANET_CORE_FN(cfun_buffer_push_uint64,
+              "(buffer/push-uint64 buffer order data)",
+              "Push a 64 bit unsigned integer data onto the end of the buffer. "
+              "Returns the modified buffer.") {
+    janet_fixarity(argc, 3);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    int reverse = should_reverse_bytes(argv, 1);
+    uint64_t data = janet_getuinteger64(argv, 2);
+    uint8_t bytes[sizeof(data)];
+    memcpy(bytes, &data, sizeof(bytes));
+    if (reverse)
+        reverse_u64(bytes);
+    janet_buffer_push_bytes(buffer, bytes, sizeof(bytes));
+    return argv[0];
+}
+
+JANET_CORE_FN(cfun_buffer_push_float32,
+              "(buffer/push-float32 buffer order data)",
+              "Push the underlying bytes of a 32 bit float data onto the end of the buffer. "
+              "Returns the modified buffer.") {
+    janet_fixarity(argc, 3);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    int reverse = should_reverse_bytes(argv, 1);
+    float data = (float) janet_getnumber(argv, 2);
+    uint8_t bytes[sizeof(data)];
+    memcpy(bytes, &data, sizeof(bytes));
+    if (reverse)
+        reverse_u32(bytes);
+    janet_buffer_push_bytes(buffer, bytes, sizeof(bytes));
+    return argv[0];
+}
+
+JANET_CORE_FN(cfun_buffer_push_float64,
+              "(buffer/push-float64 buffer order data)",
+              "Push the underlying bytes of a 64 bit float data onto the end of the buffer. "
+              "Returns the modified buffer.") {
+    janet_fixarity(argc, 3);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    int reverse = should_reverse_bytes(argv, 1);
+    double data = janet_getnumber(argv, 2);
+    uint8_t bytes[sizeof(data)];
+    memcpy(bytes, &data, sizeof(bytes));
+    if (reverse)
+        reverse_u64(bytes);
+    janet_buffer_push_bytes(buffer, bytes, sizeof(bytes));
     return argv[0];
 }
 
@@ -462,13 +602,15 @@ JANET_CORE_FN(cfun_buffer_blit,
     int same_buf = src.bytes == dest->data;
     int32_t offset_dest = 0;
     int32_t offset_src = 0;
-    if (argc > 2)
+    if (argc > 2 && !janet_checktype(argv[2], JANET_NIL))
         offset_dest = janet_gethalfrange(argv, 2, dest->count, "dest-start");
-    if (argc > 3)
+    if (argc > 3 && !janet_checktype(argv[3], JANET_NIL))
         offset_src = janet_gethalfrange(argv, 3, src.len, "src-start");
     int32_t length_src;
     if (argc > 4) {
-        int32_t src_end = janet_gethalfrange(argv, 4, src.len, "src-end");
+        int32_t src_end = src.len;
+        if (!janet_checktype(argv[4], JANET_NIL))
+            src_end = janet_gethalfrange(argv, 4, src.len, "src-end");
         length_src = src_end - offset_src;
         if (length_src < 0) length_src = 0;
     } else {
@@ -503,15 +645,42 @@ JANET_CORE_FN(cfun_buffer_format,
     return argv[0];
 }
 
+JANET_CORE_FN(cfun_buffer_format_at,
+              "(buffer/format-at buffer at format & args)",
+              "Snprintf like functionality for printing values into a buffer. Returns "
+              "the modified buffer.") {
+    janet_arity(argc, 2, -1);
+    JanetBuffer *buffer = janet_getbuffer(argv, 0);
+    int32_t at = janet_getinteger(argv, 1);
+    if (at < 0) {
+        at += buffer->count + 1;
+    }
+    if (at > buffer->count || at < 0) janet_panicf("expected index at to be in range [0, %d), got %d", buffer->count, at);
+    int32_t oldcount = buffer->count;
+    buffer->count = at;
+    const char *strfrmt = (const char *) janet_getstring(argv, 2);
+    janet_buffer_format(buffer, strfrmt, 2, argc, argv);
+    if (buffer->count < oldcount) {
+        buffer->count = oldcount;
+    }
+    return argv[0];
+}
+
 void janet_lib_buffer(JanetTable *env) {
     JanetRegExt buffer_cfuns[] = {
         JANET_CORE_REG("buffer/new", cfun_buffer_new),
         JANET_CORE_REG("buffer/new-filled", cfun_buffer_new_filled),
+        JANET_CORE_REG("buffer/from-bytes", cfun_buffer_frombytes),
         JANET_CORE_REG("buffer/fill", cfun_buffer_fill),
         JANET_CORE_REG("buffer/trim", cfun_buffer_trim),
         JANET_CORE_REG("buffer/push-byte", cfun_buffer_u8),
         JANET_CORE_REG("buffer/push-word", cfun_buffer_word),
         JANET_CORE_REG("buffer/push-string", cfun_buffer_chars),
+        JANET_CORE_REG("buffer/push-uint16", cfun_buffer_push_uint16),
+        JANET_CORE_REG("buffer/push-uint32", cfun_buffer_push_uint32),
+        JANET_CORE_REG("buffer/push-uint64", cfun_buffer_push_uint64),
+        JANET_CORE_REG("buffer/push-float32", cfun_buffer_push_float32),
+        JANET_CORE_REG("buffer/push-float64", cfun_buffer_push_float64),
         JANET_CORE_REG("buffer/push", cfun_buffer_push),
         JANET_CORE_REG("buffer/push-at", cfun_buffer_push_at),
         JANET_CORE_REG("buffer/popn", cfun_buffer_popn),
@@ -523,6 +692,7 @@ void janet_lib_buffer(JanetTable *env) {
         JANET_CORE_REG("buffer/bit-toggle", cfun_buffer_bittoggle),
         JANET_CORE_REG("buffer/blit", cfun_buffer_blit),
         JANET_CORE_REG("buffer/format", cfun_buffer_format),
+        JANET_CORE_REG("buffer/format-at", cfun_buffer_format_at),
         JANET_REG_END
     };
     janet_core_cfuns_ext(env, NULL, buffer_cfuns);

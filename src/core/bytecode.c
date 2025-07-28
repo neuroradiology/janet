@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -37,11 +37,13 @@ enum JanetInstructionType janet_instructions[JOP_INSTRUCTION_COUNT] = {
     JINT_0, /* JOP_RETURN_NIL, */
     JINT_SSI, /* JOP_ADD_IMMEDIATE, */
     JINT_SSS, /* JOP_ADD, */
+    JINT_SSI, /* JOP_SUBTRACT_IMMEDIATE, */
     JINT_SSS, /* JOP_SUBTRACT, */
     JINT_SSI, /* JOP_MULTIPLY_IMMEDIATE, */
     JINT_SSS, /* JOP_MULTIPLY, */
     JINT_SSI, /* JOP_DIVIDE_IMMEDIATE, */
     JINT_SSS, /* JOP_DIVIDE, */
+    JINT_SSS, /* JOP_DIVIDE_FLOOR */
     JINT_SSS, /* JOP_MODULO, */
     JINT_SSS, /* JOP_REMAINDER, */
     JINT_SSS, /* JOP_BAND, */
@@ -138,7 +140,7 @@ void janet_bytecode_remove_noops(JanetFuncDef *def) {
                 /* relative pc is in DS field of instruction */
                 old_jump_target = i + (((int32_t)instr) >> 8);
                 new_jump_target = pc_map[old_jump_target];
-                instr += (new_jump_target - old_jump_target + (i - j)) << 8;
+                instr += (uint32_t)(new_jump_target - old_jump_target + (i - j)) << 8;
                 break;
             case JOP_JUMP_IF:
             case JOP_JUMP_IF_NIL:
@@ -147,7 +149,7 @@ void janet_bytecode_remove_noops(JanetFuncDef *def) {
                 /* relative pc is in ES field of instruction */
                 old_jump_target = i + (((int32_t)instr) >> 16);
                 new_jump_target = pc_map[old_jump_target];
-                instr += (new_jump_target - old_jump_target + (i - j)) << 16;
+                instr += (uint32_t)(new_jump_target - old_jump_target + (i - j)) << 16;
                 break;
             default:
                 break;
@@ -224,6 +226,7 @@ void janet_bytecode_movopt(JanetFuncDef *def) {
                 case JOP_LOAD_TRUE:
                 case JOP_LOAD_FALSE:
                 case JOP_LOAD_SELF:
+                    break;
                 case JOP_MAKE_ARRAY:
                 case JOP_MAKE_BUFFER:
                 case JOP_MAKE_STRING:
@@ -231,6 +234,8 @@ void janet_bytecode_movopt(JanetFuncDef *def) {
                 case JOP_MAKE_TABLE:
                 case JOP_MAKE_TUPLE:
                 case JOP_MAKE_BRACKET_TUPLE:
+                    /* Reads from the stack, don't remove */
+                    janetc_regalloc_touch(&ra, DD);
                     break;
 
                 /* Read A */
@@ -250,6 +255,7 @@ void janet_bytecode_movopt(JanetFuncDef *def) {
                 case JOP_SIGNAL:
                 /* Write A, Read B */
                 case JOP_ADD_IMMEDIATE:
+                case JOP_SUBTRACT_IMMEDIATE:
                 case JOP_MULTIPLY_IMMEDIATE:
                 case JOP_DIVIDE_IMMEDIATE:
                 case JOP_SHIFT_LEFT_IMMEDIATE:
@@ -301,6 +307,7 @@ void janet_bytecode_movopt(JanetFuncDef *def) {
                 case JOP_SUBTRACT:
                 case JOP_MULTIPLY:
                 case JOP_DIVIDE:
+                case JOP_DIVIDE_FLOOR:
                 case JOP_MODULO:
                 case JOP_REMAINDER:
                 case JOP_SHIFT_LEFT:

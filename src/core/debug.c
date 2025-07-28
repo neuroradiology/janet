@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -102,7 +102,7 @@ void janet_stacktrace(JanetFiber *fiber, Janet err) {
 }
 
 /* Error reporting. This can be emulated from within Janet, but for
- * consitency with the top level code it is defined once. */
+ * consistency with the top level code it is defined once. */
 void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
 
     int32_t fi;
@@ -164,7 +164,7 @@ void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
                 }
             }
             if (frame->flags & JANET_STACKFRAME_TAILCALL)
-                janet_eprintf(" (tailcall)");
+                janet_eprintf(" (tail call)");
             if (frame->func && frame->pc) {
                 int32_t off = (int32_t)(frame->pc - def->bytecode);
                 if (def->sourcemap) {
@@ -180,6 +180,11 @@ void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
                 }
             }
             janet_eprintf("\n");
+            /* Print fiber points optionally. Clutters traces but provides info
+            if (i <= 0 && fi > 0) {
+                janet_eprintf("  in parent fiber\n");
+            }
+            */
         }
     }
 
@@ -388,8 +393,8 @@ JANET_CORE_FN(cfun_debug_stack,
 JANET_CORE_FN(cfun_debug_stacktrace,
               "(debug/stacktrace fiber &opt err prefix)",
               "Prints a nice looking stacktrace for a fiber. Can optionally provide "
-              "an error value to print the stack trace with. If `err` is nil or not "
-              "provided, and no prefix is given, will skip the error line. Returns the fiber.") {
+              "an error value to print the stack trace with. If `prefix` is nil or not "
+              "provided, will skip the error line. Returns the fiber.") {
     janet_arity(argc, 1, 3);
     JanetFiber *fiber = janet_getfiber(argv, 0);
     Janet x = argc == 1 ? janet_wrap_nil() : argv[1];

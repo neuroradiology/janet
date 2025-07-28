@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -698,11 +698,16 @@ Janet janet_lengthv(Janet x) {
             const JanetAbstractType *type = janet_abstract_type(abst);
             if (type->length != NULL) {
                 size_t len = type->length(abst, janet_abstract_size(abst));
-                if ((uint64_t) len <= (uint64_t) JANET_INTMAX_INT64) {
+                /* If len is always less then double, we can never overflow */
+#ifdef JANET_32
+                return janet_wrap_number(len);
+#else
+                if (len < (size_t) JANET_INTMAX_INT64) {
                     return janet_wrap_number((double) len);
                 } else {
                     janet_panicf("integer length %u too large", len);
                 }
+#endif
             }
             Janet argv[1] = { x };
             return janet_mcall("length", 1, argv);

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -34,9 +34,9 @@
  * because E is a valid digit in bases 15 or greater. For bases greater than
  * 10, the letters are used as digits. A through Z correspond to the digits 10
  * through 35, and the lowercase letters have the same values. The radix number
- * is always in base 10. For example, a hexidecimal number could be written
+ * is always in base 10. For example, a hexadecimal number could be written
  * '16rdeadbeef'. janet_scan_number also supports some c style syntax for
- * hexidecimal literals. The previous number could also be written
+ * hexadecimal literals. The previous number could also be written
  * '0xdeadbeef'.
  */
 
@@ -301,6 +301,7 @@ int janet_scan_number_base(
     if (base == 0) {
         base = 10;
     }
+    int exp_base = base;
 
     /* Skip leading zeros */
     while (str < end && (*str == '0' || *str == '.')) {
@@ -321,6 +322,12 @@ int janet_scan_number_base(
             seenpoint = 1;
         } else if (*str == '&') {
             foundexp = 1;
+            break;
+        } else if (base == 16 && (*str == 'P' || *str == 'p')) { /* IEEE hex float */
+            foundexp = 1;
+            exp_base = 10;
+            base = 2;
+            ex *= 4; /* We need to correct the current exponent after we change the base */
             break;
         } else if (base == 10 && (*str == 'E' || *str == 'e')) {
             foundexp = 1;
@@ -360,9 +367,9 @@ int janet_scan_number_base(
         }
         while (str < end) {
             int digit = digit_lookup[*str & 0x7F];
-            if (*str > 127 || digit >= base) goto error;
+            if (*str > 127 || digit >= exp_base) goto error;
             if (ee < (INT32_MAX / 40)) {
-                ee = base * ee + digit;
+                ee = exp_base * ee + digit;
             }
             str++;
             seenadigit = 1;
@@ -489,4 +496,53 @@ int janet_scan_uint64(const uint8_t *str, int32_t len, uint64_t *out) {
     return 0;
 }
 
+/* Similar to janet_scan_number but allows for
+ * more numeric types with a given suffix. */
+int janet_scan_numeric(
+    const uint8_t *str,
+    int32_t len,
+    Janet *out) {
+    int result;
+    double num;
+    int64_t i64 = 0;
+    uint64_t u64 = 0;
+    if (len < 2 || str[len - 2] != ':') {
+        result = janet_scan_number_base(str, len, 0, &num);
+        *out = janet_wrap_number(num);
+        return result;
+    }
+    switch (str[len - 1]) {
+        default:
+            return 1;
+        case 'n':
+            result = janet_scan_number_base(str, len - 2, 0, &num);
+            *out = janet_wrap_number(num);
+            return result;
+        /* Condition is inverted janet_scan_int64 and janet_scan_uint64 */
+        case 's':
+            result = !janet_scan_int64(str, len - 2, &i64);
+            *out = janet_wrap_s64(i64);
+            return result;
+        case 'u':
+            result = !janet_scan_uint64(str, len - 2, &u64);
+            *out = janet_wrap_u64(u64);
+            return result;
+    }
+}
+
 #endif
+
+void janet_buffer_dtostr(JanetBuffer *buffer, double x) {
+#define BUFSIZE 32
+    janet_buffer_extra(buffer, BUFSIZE);
+    int count = snprintf((char *) buffer->data + buffer->count, BUFSIZE, "%.17g", x);
+#undef BUFSIZE
+    /* fix locale issues with commas */
+    for (int i = 0; i < count; i++) {
+        char c = buffer->data[buffer->count + i];
+        if (c == ',') {
+            buffer->data[buffer->count + i] = '.';
+        }
+    }
+    buffer->count += count;
+}

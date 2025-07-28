@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -69,9 +69,9 @@ JANET_CORE_FN(cfun_tuple_slice,
               "inclusive to index `end` exclusive. If `start` or `end` are not provided, "
               "they default to 0 and the length of `arrtup`, respectively. "
               "`start` and `end` can also be negative to indicate indexing "
-              "from the end of the input. Note that index -1 is synonymous with "
-              "index `(length arrtup)` to allow a full negative slice range. "
-              "Returns the new tuple.") {
+              "from the end of the input. Note that if `start` is negative it is "
+              "exclusive, and if `end` is negative it is inclusive, to allow a full "
+              "negative slice range. Returns the new tuple.") {
     JanetView view = janet_getindexed(argv, 0);
     JanetRange range = janet_getslice(argc, argv);
     return janet_wrap_tuple(janet_tuple_n(view.items + range.start, range.end - range.start));
@@ -116,6 +116,34 @@ JANET_CORE_FN(cfun_tuple_setmap,
     return argv[0];
 }
 
+JANET_CORE_FN(cfun_tuple_join,
+              "(tuple/join & parts)",
+              "Create a tuple by joining together other tuples and arrays.") {
+    janet_arity(argc, 0, -1);
+    int32_t total_len = 0;
+    for (int32_t i = 0; i < argc; i++) {
+        int32_t len = 0;
+        const Janet *vals = NULL;
+        if (!janet_indexed_view(argv[i], &vals, &len)) {
+            janet_panicf("expected indexed type for argument %d, got %v", i, argv[i]);
+        }
+        if (INT32_MAX - total_len < len) {
+            janet_panic("tuple too large");
+        }
+        total_len += len;
+    }
+    Janet *tup = janet_tuple_begin(total_len);
+    Janet *tup_cursor = tup;
+    for (int32_t i = 0; i < argc; i++) {
+        int32_t len = 0;
+        const Janet *vals = NULL;
+        janet_indexed_view(argv[i], &vals, &len);
+        memcpy(tup_cursor, vals, len * sizeof(Janet));
+        tup_cursor += len;
+    }
+    return janet_wrap_tuple(janet_tuple_end(tup));
+}
+
 /* Load the tuple module */
 void janet_lib_tuple(JanetTable *env) {
     JanetRegExt tuple_cfuns[] = {
@@ -124,6 +152,7 @@ void janet_lib_tuple(JanetTable *env) {
         JANET_CORE_REG("tuple/type", cfun_tuple_type),
         JANET_CORE_REG("tuple/sourcemap", cfun_tuple_sourcemap),
         JANET_CORE_REG("tuple/setmap", cfun_tuple_setmap),
+        JANET_CORE_REG("tuple/join", cfun_tuple_join),
         JANET_REG_END
     };
     janet_core_cfuns_ext(env, NULL, tuple_cfuns);

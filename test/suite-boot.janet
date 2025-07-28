@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2025 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -113,12 +113,21 @@
 # 7478ad11
 (assert (= nil (any? [])) "any? 1")
 (assert (= nil (any? [false nil])) "any? 2")
-(assert (= nil (any? [nil false])) "any? 3")
+(assert (= false (any? [nil false])) "any? 3")
 (assert (= 1 (any? [1])) "any? 4")
 (assert (nan? (any? [nil math/nan nil])) "any? 5")
 (assert (= true
            (any? [nil nil false nil nil true nil nil nil nil false :a nil]))
         "any? 6")
+
+(assert (= true (every? [])) "every? 1")
+(assert (= true (every? [1 true])) "every? 2")
+(assert (= 1 (every? [true 1])) "every? 3")
+(assert (= nil (every? [nil])) "every? 4")
+(assert (= 2 (every? [1 math/nan 2])) "every? 5")
+(assert (= false
+           (every? [1 1 true 1 1 false 1 1 1 1 true :a nil]))
+        "every? 6")
 
 # Some higher order functions and macros
 # 5e2de33
@@ -129,6 +138,13 @@
 (assert (= (if-let [a my-array k (next a 5)] :t :f) :f) "if-let 4")
 (assert (= (if-let [[a b] my-array] a) 1) "if-let 5")
 (assert (= (if-let [{:a a :b b} {:a 1 :b 2}] b) 2) "if-let 6")
+(assert (= (if-let [[a b] nil] :t :f) :f) "if-let 7")
+
+# #1191
+(var cnt 0)
+(defmacro upcnt [] (++ cnt))
+(assert (= (if-let [a true b true c true] nil (upcnt)) nil) "issue #1191")
+(assert (= cnt 1) "issue #1191")
 
 (assert (= 14 (sum (map inc @[1 2 3 4]))) "sum map")
 (def myfun (juxt + - * /))
@@ -170,6 +186,11 @@
 (assert (= txs [[-1 -1] [-1 0] [-1 1] [0 -1] [0 1] [1 -1] [1 0] [1 1]])
         "nested seq")
 
+# :unless modifier
+(assert (deep= (seq [i :range [0 10] :unless (odd? i)] i)
+               @[0 2 4 6 8])
+        ":unless modifier")
+
 # 515891b03
 (assert (deep= (tabseq [i :in (range 3)] i (* 3 i))
                @{0 0 1 3 2 6}))
@@ -187,6 +208,12 @@
         "loop :range-to")
 (assert (deep= (seq [x :down-to [10 0]] x) (seq [x :down [10 -1]] x))
         "loop :down-to")
+
+# one-term :range forms
+(assert (deep= (seq [x :range [10]] x) (seq [x :range [0 10]] x))
+        "one-term :range")
+(assert (deep= (seq [x :down [10]] x) (seq [x :down [10 0]] x))
+        "one-term :down")
 
 # 7880d7320
 (def res @{})
@@ -213,6 +240,16 @@
   (++ gencount)
   (assert (pos? (% x 4)) "generate in loop"))
 (assert (= gencount 75) "generate loop count")
+
+# more loop checks
+(assert (deep= (seq [i :range [0 10]] i) @[0 1 2 3 4 5 6 7 8 9]) "seq 1")
+(assert (deep= (seq [i :range [0 10 2]] i) @[0 2 4 6 8]) "seq 2")
+(assert (deep= (seq [i :range [10]] i) @[0 1 2 3 4 5 6 7 8 9]) "seq 3")
+(assert (deep= (seq [i :range-to [10]] i) @[0 1 2 3 4 5 6 7 8 9 10]) "seq 4")
+(def gen (generate [x :range-to [0 nil 2]] x))
+(assert (deep= (take 5 gen) @[0 2 4 6 8]) "generate nil limit")
+(def gen (generate [x :range [0 nil 2]] x))
+(assert (deep= (take 5 gen) @[0 2 4 6 8]) "generate nil limit 2")
 
 # Even and odd
 # ff163a5ae
@@ -327,6 +364,13 @@
         "sort 5")
 (assert (<= ;(sort (map (fn [x] (math/random)) (range 1000)))) "sort 6")
 
+# #1283
+(assert (deep=
+          (partition 2 (generate [ i :in [:a :b :c :d :e]] i))
+          '@[(:a :b) (:c :d) (:e)]))
+(assert (= (mean (generate [i :in [2 3 5 7 11]] i))
+           5.6))
+
 # And and or
 # c16a9d846
 (assert (= (and true true) true) "and true true")
@@ -355,14 +399,7 @@
 (assert (= false (and false false)) "and 1")
 (assert (= false (or false false)) "or 1")
 
-# Range
-# a982f351d
-(assert (deep= (range 10) @[0 1 2 3 4 5 6 7 8 9]) "range 1 argument")
-(assert (deep= (range 5 10) @[5 6 7 8 9]) "range 2 arguments")
-(assert (deep= (range 5 10 2) @[5 7 9]) "range 3 arguments")
 # 11cd1279d
-(assert (= (length (range 10)) 10) "(range 10)")
-(assert (= (length (range 1 10)) 9) "(range 1 10)")
 (assert (deep= @{:a 1 :b 2 :c 3} (zipcoll '[:a :b :c] '[1 2 3])) "zipcoll")
 
 # bc8be266f
@@ -717,7 +754,7 @@
     (default name (string "has-key? " (++ test-has-key-auto)))
     (assert (= expected (has-key? col key)) name)
     (if
-      # guarenteed by `has-key?` to never fail
+      # guaranteed by `has-key?` to never fail
       expected (in col key)
       # if `has-key?` is false, then `in` should fail (for indexed types)
       #
@@ -828,6 +865,13 @@
 (assert (deep= ~(,import* "a" :as "b" :fresh maybe)
                (macex '(import a :as b :fresh maybe))) "import macro 2")
 
+# 2af3f21d
+(assert-error "import macro 2" (macex '(import a :fresh)))
+(assert-error "import macro 3" (macex '(import a :as b :fresh)))
+(assert-error "import macro 4" (macex '(import b "notakeyword" value)))
+(assert (deep= ~(,import* "a" :fresh nil)
+               (macex '(import a :fresh nil))) "import macro 5")
+
 # #477 walk preserving bracket type
 # 0a1d902f4
 (assert (= :brackets (tuple/type (postwalk identity '[])))
@@ -859,10 +903,17 @@
   (struct/with-proto {:a [1 2 3]} :c 22 :b [1 2 3 4] :d "test" :e "test2"))
 (table/setproto table-to-freeze @{:a @[1 2 3]})
 
-(assert (deep= {:a [1 2 3] :b [1 2 3 4] :c 22 :d "test" :e "test2"}
-               (freeze table-to-freeze)))
+(assert (deep= struct-to-thaw (freeze table-to-freeze)))
 (assert (deep= table-to-freeze-with-inline-proto (thaw table-to-freeze)))
 (assert (deep= table-to-freeze-with-inline-proto (thaw struct-to-thaw)))
+
+# Check that freezing mutable keys is deterministic
+# for issue #1535
+(def hashes @{})
+(repeat 200
+  (def x (freeze {@"" 1 @"" 2 @"" 3 @"" 4 @"" 5}))
+  (put hashes (hash x) true))
+(assert (= 1 (length hashes)) "freeze mutable keys is deterministic")
 
 # Make sure Carriage Returns don't end up in doc strings
 # e528b86
@@ -879,5 +930,97 @@
 (assert (= (thunk) 1) "delay 3")
 (assert (= counter 1) "delay 4")
 
-(end-suite)
+# maclintf
+(def env (table/clone (curenv)))
+((compile '(defmacro foo [] (maclintf :strict "oops")) env :anonymous))
+(def lints @[])
+(compile (tuple/setmap '(foo) 1 2) env :anonymous lints)
+(assert (deep= lints @[[:strict 1 2 "oops"]]) "maclintf 1")
 
+(def env (table/clone (curenv)))
+((compile '(defmacro foo [& body] (maclintf :strict "foo-oops") ~(do ,;body)) env :anonymous))
+((compile '(defmacro bar [] (maclintf :strict "bar-oops")) env :anonymous))
+(def lints @[])
+# Compile (foo (bar)), but with explicit source map values
+(def bar-invoke (tuple/setmap '(bar) 3 4))
+(compile (tuple/setmap ~(foo ,bar-invoke) 1 2) env :anonymous lints)
+(assert (deep= lints @[[:strict 1 2 "foo-oops"]
+                       [:strict 3 4 "bar-oops"]])
+        "maclintf 2")
+
+# Bad bytecode wrt. using result from break expression
+(defn bytecode-roundtrip
+  [f]
+  (assert-no-error "bytecode round-trip" (unmarshal (marshal f make-image-dict))))
+
+(defn case-1 [&] (def x (break 1)))
+(bytecode-roundtrip case-1)
+(defn foo [&])
+(defn case-2 [&]
+  (foo (break (foo)))
+  (foo))
+(bytecode-roundtrip case-2)
+(defn case-3 [&]
+  (def x (break (do (foo)))))
+(bytecode-roundtrip case-3)
+(defn case-4 [&]
+  (def x (break (break (foo)))))
+(bytecode-roundtrip case-4)
+(defn case-4 [&]
+  (def x (break (break (break)))))
+(bytecode-roundtrip case-4)
+(defn case-5 []
+  (def foo (fn [one two] one))
+  (foo 100 200))
+(bytecode-roundtrip case-5)
+
+# Debug bytecode of these functions
+# (pp (disasm case-1))
+# (pp (disasm case-2))
+# (pp (disasm case-3))
+
+# Regression #1330
+(defn regress-1330 [&]
+  (def a [1 2 3])
+  (def b [;a])
+  (identity a))
+(assert (= [1 2 3] (regress-1330)) "regression 1330")
+
+# Issue 1341
+(assert (= () '() (macex '())) "macex ()")
+(assert (= '[] (macex '[])) "macex []")
+
+(assert (= :a (with-env @{:b :a} (dyn :b))) "with-env dyn")
+(assert-error "unknown symbol +" (with-env @{} (eval '(+ 1 2))))
+
+(setdyn *debug* true)
+(def source '(defn a [x] (+ x x)))
+(eval source)
+(assert (= 20 (a 10)))
+(assert (deep= (get (dyn 'a) :source-form) source))
+(setdyn *debug* nil)
+
+# issue #1516
+(assert-error "assertf 1 argument" (macex '(assertf true)))
+(assert (assertf true "fun message") "assertf 2 arguments")
+(assert (assertf true "%s message" "mystery") "assertf 3 arguments")
+(assert (assertf (not nil) "%s message" "ordinary") "assertf not nil")
+(assert-error "assertf error 2" (assertf false "fun message"))
+(assert-error "assertf error 3" (assertf false "%s message" "mystery"))
+(assert-error "assertf error 4" (assertf nil "%s %s" "alice" "bob"))
+
+# issue #1535
+(loop [i :range [1 1000]]
+  (assert (deep-not= @{:key1 "value1" @"key" "value2"}
+                     @{:key1 "value1" @"key" "value2"}) "deep= mutable keys"))
+(assert (deep-not= {"abc" 123} {@"abc" 123}) "deep= mutable keys vs immutable key")
+(assert (deep-not= {@"" 1 @"" 2 @"" 3} {@"" 1 @"" 2 @"" 3}) "deep= duplicate mutable keys")
+(assert (deep-not= {@"" @"" @"" @"" @"" 3} {@"" @"" @"" @"" @"" 3}) "deep= duplicate mutable keys 2")
+(assert (deep-not= {@[] @"" @[] @"" @[] 3} {@[] @"" @[] @"" @[] 3}) "deep= duplicate mutable keys 3")
+(assert (deep-not= {@{} @"" @{} @"" @{} 3} {@{} @"" @{} @"" @{} 3}) "deep= duplicate mutable keys 4")
+(assert (deep-not= @{:key1 "value1" @"key2" @"value2"}
+                   @{:key1 "value1" @"key2" "value2"}) "deep= mutable keys")
+(assert (deep-not= @{:key1 "value1" [@"key2"] @"value2"}
+                   @{:key1 "value1" [@"key2"] @"value2"}) "deep= mutable keys")
+
+(end-suite)

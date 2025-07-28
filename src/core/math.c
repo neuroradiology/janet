@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -85,10 +85,10 @@ void janet_rng_longseed(JanetRNG *rng, const uint8_t *bytes, int32_t len) {
     uint8_t state[16] = {0};
     for (int32_t i = 0; i < len; i++)
         state[i & 0xF] ^= bytes[i];
-    rng->a = state[0] + (state[1] << 8) + (state[2] << 16) + (state[3] << 24);
-    rng->b = state[4] + (state[5] << 8) + (state[6] << 16) + (state[7] << 24);
-    rng->c = state[8] + (state[9] << 8) + (state[10] << 16) + (state[11] << 24);
-    rng->d = state[12] + (state[13] << 8) + (state[14] << 16) + (state[15] << 24);
+    rng->a = state[0] + ((uint32_t) state[1] << 8) + ((uint32_t) state[2] << 16) + ((uint32_t) state[3] << 24);
+    rng->b = state[4] + ((uint32_t) state[5] << 8) + ((uint32_t) state[6] << 16) + ((uint32_t) state[7] << 24);
+    rng->c = state[8] + ((uint32_t) state[9] << 8) + ((uint32_t) state[10] << 16) + ((uint32_t) state[11] << 24);
+    rng->d = state[12] + ((uint32_t) state[13] << 8) + ((uint32_t) state[14] << 16) + ((uint32_t) state[15] << 24);
     rng->counter = 0u;
     /* a, b, c, d can't all be 0 */
     if (rng->a == 0) rng->a = 1u;
@@ -119,7 +119,7 @@ double janet_rng_double(JanetRNG *rng) {
 
 JANET_CORE_FN(cfun_rng_make,
               "(math/rng &opt seed)",
-              "Creates a Psuedo-Random number generator, with an optional seed. "
+              "Creates a Pseudo-Random number generator, with an optional seed. "
               "The seed should be an unsigned 32 bit integer or a buffer. "
               "Do not use this for cryptography. Returns a core/rng abstract type."
              ) {
@@ -349,6 +349,26 @@ JANET_CORE_FN(janet_cfun_lcm, "(math/lcm x y)",
     return janet_wrap_number(janet_lcm(x, y));
 }
 
+JANET_CORE_FN(janet_cfun_frexp, "(math/frexp x)",
+              "Returns a tuple of (mantissa, exponent) from number.") {
+    janet_fixarity(argc, 1);
+    double x = janet_getnumber(argv, 0);
+    int exp;
+    x = frexp(x, &exp);
+    Janet *result = janet_tuple_begin(2);
+    result[0] = janet_wrap_number(x);
+    result[1] = janet_wrap_number((double) exp);
+    return janet_wrap_tuple(janet_tuple_end(result));
+}
+
+JANET_CORE_FN(janet_cfun_ldexp, "(math/ldexp m e)",
+              "Creates a new number from a mantissa and an exponent.") {
+    janet_fixarity(argc, 2);
+    double x = janet_getnumber(argv, 0);
+    int32_t y = janet_getinteger(argv, 1);
+    return janet_wrap_number(ldexp(x, y));
+}
+
 /* Module entry point */
 void janet_lib_math(JanetTable *env) {
     JanetRegExt math_cfuns[] = {
@@ -395,6 +415,8 @@ void janet_lib_math(JanetTable *env) {
         JANET_CORE_REG("math/next", janet_nextafter),
         JANET_CORE_REG("math/gcd", janet_cfun_gcd),
         JANET_CORE_REG("math/lcm", janet_cfun_lcm),
+        JANET_CORE_REG("math/frexp", janet_cfun_frexp),
+        JANET_CORE_REG("math/ldexp", janet_cfun_ldexp),
         JANET_REG_END
     };
     janet_core_cfuns_ext(env, NULL, math_cfuns);
@@ -411,11 +433,11 @@ void janet_lib_math(JanetTable *env) {
     JANET_CORE_DEF(env, "math/int32-min", janet_wrap_number(INT32_MIN),
                    "The minimum contiguous integer representable by a 32 bit signed integer");
     JANET_CORE_DEF(env, "math/int32-max", janet_wrap_number(INT32_MAX),
-                   "The maximum contiguous integer represtenable by a 32 bit signed integer");
+                   "The maximum contiguous integer representable by a 32 bit signed integer");
     JANET_CORE_DEF(env, "math/int-min", janet_wrap_number(JANET_INTMIN_DOUBLE),
                    "The minimum contiguous integer representable by a double (2^53)");
     JANET_CORE_DEF(env, "math/int-max", janet_wrap_number(JANET_INTMAX_DOUBLE),
-                   "The maximum contiguous integer represtenable by a double (-(2^53))");
+                   "The maximum contiguous integer representable by a double (-(2^53))");
 #ifdef NAN
     JANET_CORE_DEF(env, "math/nan", janet_wrap_number(NAN), "Not a number (IEEE-754 NaN)");
 #else

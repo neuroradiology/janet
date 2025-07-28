@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2025 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -69,15 +69,15 @@ JanetModule janet_native(const char *name, const uint8_t **error) {
             host.minor < modconf.minor ||
             host.bits != modconf.bits) {
         char errbuf[128];
-        sprintf(errbuf, "config mismatch - host %d.%.d.%d(%.4x) vs. module %d.%d.%d(%.4x)",
-                host.major,
-                host.minor,
-                host.patch,
-                host.bits,
-                modconf.major,
-                modconf.minor,
-                modconf.patch,
-                modconf.bits);
+        snprintf(errbuf, sizeof(errbuf), "config mismatch - host %d.%.d.%d(%.4x) vs. module %d.%d.%d(%.4x)",
+                 host.major,
+                 host.minor,
+                 host.patch,
+                 host.bits,
+                 modconf.major,
+                 modconf.minor,
+                 modconf.patch,
+                 modconf.bits);
         *error = janet_cstring(errbuf);
         return NULL;
     }
@@ -110,14 +110,14 @@ JANET_CORE_FN(janet_core_expand_path,
               "(module/expand-path path template)",
               "Expands a path template as found in `module/paths` for `module/find`. "
               "This takes in a path (the argument to require) and a template string, "
-              "to expand the path to a path that can be "
-              "used for importing files. The replacements are as follows:\n\n"
+              "to expand the path to a path that can be used for importing files. "
+              "The replacements are as follows:\n\n"
               "* :all: -- the value of path verbatim.\n\n"
-              "* :@all: -- Same as :all:, but if `path` starts with the @ character,\n"
-              "           the first path segment is replaced with a dynamic binding\n"
-              "           `(dyn <first path segment as keyword>)`.\n\n"
-              "* :cur: -- the current file, or (dyn :current-file)\n\n"
-              "* :dir: -- the directory containing the current file\n\n"
+              "* :@all: -- Same as :all:, but if `path` starts with the @ character, "
+              "the first path segment is replaced with a dynamic binding "
+              "`(dyn <first path segment as keyword>)`.\n\n"
+              "* :cur: -- the directory portion, if any, of (dyn :current-file)\n\n"
+              "* :dir: -- the directory portion, if any, of the path argument\n\n"
               "* :name: -- the name component of path, with extension if given\n\n"
               "* :native: -- the extension used to load natives, .so or .dll\n\n"
               "* :sys: -- the system path, or (dyn :syspath)") {
@@ -426,6 +426,48 @@ JANET_CORE_FN(janet_core_slice,
     }
 }
 
+JANET_CORE_FN(janet_core_range,
+              "(range & args)",
+              "Create an array of values [start, end) with a given step. "
+              "With one argument, returns a range [0, end). With two arguments, returns "
+              "a range [start, end). With three, returns a range with optional step size.") {
+    janet_arity(argc, 1, 3);
+    double start = 0, stop = 0, step = 1, count = 0;
+    if (argc == 3) {
+        start = janet_getnumber(argv, 0);
+        stop = janet_getnumber(argv, 1);
+        step = janet_getnumber(argv, 2);
+        count = (step > 0) ? (stop - start) / step :
+                ((step < 0) ? (stop - start) / step : 0);
+    } else if (argc == 2) {
+        start = janet_getnumber(argv, 0);
+        stop = janet_getnumber(argv, 1);
+        count = stop - start;
+    } else {
+        stop = janet_getnumber(argv, 0);
+        count = stop;
+    }
+    count = (count > 0) ? count : 0;
+    int32_t int_count;
+    janet_assert(count >= 0, "bad range code");
+    if (count > (double) INT32_MAX) {
+        janet_panicf("range is too large, %f elements", count);
+    } else {
+        int_count = (int32_t) ceil(count);
+    }
+    if (step > 0.0) {
+        janet_assert(start + int_count * step >= stop, "bad range code");
+    } else {
+        janet_assert(start + int_count * step <= stop, "bad range code");
+    }
+    JanetArray *array = janet_array(int_count);
+    for (int32_t i = 0; i < int_count; i++) {
+        array->data[i] = janet_wrap_number((double) start + (double) i * step);
+    }
+    array->count = int_count;
+    return janet_wrap_array(array);
+}
+
 JANET_CORE_FN(janet_core_table,
               "(table & kvs)",
               "Creates a new table from a variadic number of keys and values. "
@@ -611,27 +653,56 @@ JANET_CORE_FN(janet_core_check_int,
               "(int? x)",
               "Check if x can be exactly represented as a 32 bit signed two's complement integer.") {
     janet_fixarity(argc, 1);
-    if (!janet_checktype(argv[0], JANET_NUMBER)) goto ret_false;
-    double num = janet_unwrap_number(argv[0]);
-    return janet_wrap_boolean(num == (double)((int32_t)num));
-ret_false:
-    return janet_wrap_false();
+    return janet_wrap_boolean(janet_checkint(argv[0]));
 }
 
 JANET_CORE_FN(janet_core_check_nat,
               "(nat? x)",
               "Check if x can be exactly represented as a non-negative 32 bit signed two's complement integer.") {
     janet_fixarity(argc, 1);
-    if (!janet_checktype(argv[0], JANET_NUMBER)) goto ret_false;
-    double num = janet_unwrap_number(argv[0]);
-    return janet_wrap_boolean(num >= 0 && (num == (double)((int32_t)num)));
-ret_false:
-    return janet_wrap_false();
+    if (!janet_checkint(argv[0])) return janet_wrap_false();
+    return janet_wrap_boolean(janet_unwrap_integer(argv[0]) >= 0);
+}
+
+JANET_CORE_FN(janet_core_is_bytes,
+              "(bytes? x)",
+              "Check if x is a string, symbol, keyword, or buffer.") {
+    janet_fixarity(argc, 1);
+    return janet_wrap_boolean(janet_checktypes(argv[0], JANET_TFLAG_BYTES));
+}
+
+JANET_CORE_FN(janet_core_is_indexed,
+              "(indexed? x)",
+              "Check if x is an array or tuple.") {
+    janet_fixarity(argc, 1);
+    return janet_wrap_boolean(janet_checktypes(argv[0], JANET_TFLAG_INDEXED));
+}
+
+JANET_CORE_FN(janet_core_is_dictionary,
+              "(dictionary? x)",
+              "Check if x is a table or struct.") {
+    janet_fixarity(argc, 1);
+    return janet_wrap_boolean(janet_checktypes(argv[0], JANET_TFLAG_DICTIONARY));
+}
+
+JANET_CORE_FN(janet_core_is_lengthable,
+              "(lengthable? x)",
+              "Check if x is a bytes, indexed, or dictionary.") {
+    janet_fixarity(argc, 1);
+    return janet_wrap_boolean(janet_checktypes(argv[0], JANET_TFLAG_LENGTHABLE));
 }
 
 JANET_CORE_FN(janet_core_signal,
               "(signal what x)",
-              "Raise a signal with payload x. ") {
+              "Raise a signal with payload x. `what` can be an integer\n"
+              "from 0 through 7 indicating user(0-7), or one of:\n\n"
+              "* :ok\n"
+              "* :error\n"
+              "* :debug\n"
+              "* :yield\n"
+              "* :user(0-7)\n"
+              "* :interrupt\n"
+              "* :await") {
     janet_arity(argc, 1, 2);
     Janet payload = argc == 2 ? argv[1] : janet_wrap_nil();
     if (janet_checkint(argv[0])) {
@@ -690,6 +761,7 @@ static const SandboxOption sandbox_options[] = {
     {"net-connect", JANET_SANDBOX_NET_CONNECT},
     {"net-listen", JANET_SANDBOX_NET_LISTEN},
     {"sandbox", JANET_SANDBOX_SANDBOX},
+    {"signal", JANET_SANDBOX_SIGNAL},
     {"subprocess", JANET_SANDBOX_SUBPROCESS},
     {NULL, 0}
 };
@@ -714,6 +786,7 @@ JANET_CORE_FN(janet_core_sandbox,
               "* :net-connect - disallow making outbound network connections\n"
               "* :net-listen - disallow accepting inbound network connections\n"
               "* :sandbox - disallow calling this function\n"
+              "* :signal - disallow adding or removing signal handlers\n"
               "* :subprocess - disallow running subprocesses") {
     uint32_t flags = 0;
     for (int32_t i = 0; i < argc; i++) {
@@ -916,18 +989,17 @@ static void make_apply(JanetTable *env) {
         /* Push the array */
         S(JOP_PUSH_ARRAY, 5),
 
-        /* Call the funciton */
+        /* Call the function */
         S(JOP_TAILCALL, 0)
     };
     janet_quick_asm(env, JANET_FUN_APPLY | JANET_FUNCDEF_FLAG_VARARG,
                     "apply", 1, 1, INT32_MAX, 6, apply_asm, sizeof(apply_asm),
                     JDOC("(apply f & args)\n\n"
-                         "Applies a function to a variable number of arguments. Each element in args "
-                         "is used as an argument to f, except the last element in args, which is expected to "
-                         "be an array-like. Each element in this last argument is then also pushed as an argument to "
-                         "f. For example:\n\n"
-                         "\t(apply + 1000 (range 10))\n\n"
-                         "sums the first 10 integers and 1000."));
+         "Applies a function f to a variable number of arguments. Each "
+         "element in args is used as an argument to f, except the last "
+         "element in args, which is expected to be an array or a tuple. "
+         "Each element in this last argument is then also pushed as an "
+         "argument to f."));
 }
 
 static const uint32_t error_asm[] = {
@@ -985,14 +1057,6 @@ static const uint32_t next_asm[] = {
     JOP_NEXT | (1 << 24),
     JOP_RETURN
 };
-static const uint32_t modulo_asm[] = {
-    JOP_MODULO | (1 << 24),
-    JOP_RETURN
-};
-static const uint32_t remainder_asm[] = {
-    JOP_REMAINDER | (1 << 24),
-    JOP_RETURN
-};
 static const uint32_t cmp_asm[] = {
     JOP_COMPARE | (1 << 24),
     JOP_RETURN
@@ -1031,7 +1095,12 @@ static void janet_load_libs(JanetTable *env) {
         JANET_CORE_REG("module/expand-path", janet_core_expand_path),
         JANET_CORE_REG("int?", janet_core_check_int),
         JANET_CORE_REG("nat?", janet_core_check_nat),
+        JANET_CORE_REG("bytes?", janet_core_is_bytes),
+        JANET_CORE_REG("indexed?", janet_core_is_indexed),
+        JANET_CORE_REG("dictionary?", janet_core_is_dictionary),
+        JANET_CORE_REG("lengthable?", janet_core_is_lengthable),
         JANET_CORE_REG("slice", janet_core_slice),
+        JANET_CORE_REG("range", janet_core_range),
         JANET_CORE_REG("signal", janet_core_signal),
         JANET_CORE_REG("memcmp", janet_core_memcmp),
         JANET_CORE_REG("getproto", janet_core_getproto),
@@ -1064,6 +1133,9 @@ static void janet_load_libs(JanetTable *env) {
 #endif
 #ifdef JANET_EV
     janet_lib_ev(env);
+#ifdef JANET_FILEWATCH
+    janet_lib_filewatch(env);
+#endif
 #endif
 #ifdef JANET_NET
     janet_lib_net(env);
@@ -1077,90 +1149,85 @@ static void janet_load_libs(JanetTable *env) {
 
 JanetTable *janet_core_env(JanetTable *replacements) {
     JanetTable *env = (NULL != replacements) ? replacements : janet_table(0);
-    janet_quick_asm(env, JANET_FUN_MODULO,
-                    "mod", 2, 2, 2, 2, modulo_asm, sizeof(modulo_asm),
-                    JDOC("(mod dividend divisor)\n\n"
-                         "Returns the modulo of dividend / divisor."));
-    janet_quick_asm(env, JANET_FUN_REMAINDER,
-                    "%", 2, 2, 2, 2, remainder_asm, sizeof(remainder_asm),
-                    JDOC("(% dividend divisor)\n\n"
-                         "Returns the remainder of dividend / divisor."));
     janet_quick_asm(env, JANET_FUN_CMP,
                     "cmp", 2, 2, 2, 2, cmp_asm, sizeof(cmp_asm),
                     JDOC("(cmp x y)\n\n"
-                         "Returns -1 if x is strictly less than y, 1 if y is strictly greater "
-                         "than x, and 0 otherwise. To return 0, x and y must be the exact same type."));
+         "Returns -1 if x is strictly less than y, 1 if y is strictly greater "
+         "than x, and 0 otherwise. To return 0, x and y must be the exact same type."));
     janet_quick_asm(env, JANET_FUN_NEXT,
                     "next", 2, 1, 2, 2, next_asm, sizeof(next_asm),
                     JDOC("(next ds &opt key)\n\n"
-                         "Gets the next key in a data structure. Can be used to iterate through "
-                         "the keys of a data structure in an unspecified order. Keys are guaranteed "
-                         "to be seen only once per iteration if they data structure is not mutated "
-                         "during iteration. If key is nil, next returns the first key. If next "
-                         "returns nil, there are no more keys to iterate through."));
+         "Gets the next key in a data structure. Can be used to iterate through "
+         "the keys of a data structure in an unspecified order. Keys are guaranteed "
+         "to be seen only once per iteration if the data structure is not mutated "
+         "during iteration. If key is nil, next returns the first key. If next "
+         "returns nil, there are no more keys to iterate through."));
     janet_quick_asm(env, JANET_FUN_PROP,
                     "propagate", 2, 2, 2, 2, propagate_asm, sizeof(propagate_asm),
                     JDOC("(propagate x fiber)\n\n"
-                         "Propagate a signal from a fiber to the current fiber. The resulting "
-                         "stack trace from the current fiber will include frames from fiber. If "
-                         "fiber is in a state that can be resumed, resuming the current fiber will "
-                         "first resume fiber. This function can be used to re-raise an error without "
-                         "losing the original stack trace."));
+         "Propagate a signal from a fiber to the current fiber and "
+         "set the last value of the current fiber to `x`.  The signal "
+         "value is then available as the status of the current fiber. "
+         "The resulting stack trace from the current fiber will include "
+         "frames from fiber. If fiber is in a state that can be resumed, "
+         "resuming the current fiber will first resume `fiber`. "
+         "This function can be used to re-raise an error without losing "
+         "the original stack trace."));
     janet_quick_asm(env, JANET_FUN_DEBUG,
                     "debug", 1, 0, 1, 1, debug_asm, sizeof(debug_asm),
                     JDOC("(debug &opt x)\n\n"
-                         "Throws a debug signal that can be caught by a parent fiber and used to inspect "
-                         "the running state of the current fiber. Returns the value passed in by resume."));
+         "Throws a debug signal that can be caught by a parent fiber and used to inspect "
+         "the running state of the current fiber. Returns the value passed in by resume."));
     janet_quick_asm(env, JANET_FUN_ERROR,
                     "error", 1, 1, 1, 1, error_asm, sizeof(error_asm),
                     JDOC("(error e)\n\n"
-                         "Throws an error e that can be caught and handled by a parent fiber."));
+         "Throws an error e that can be caught and handled by a parent fiber."));
     janet_quick_asm(env, JANET_FUN_YIELD,
                     "yield", 1, 0, 1, 2, yield_asm, sizeof(yield_asm),
                     JDOC("(yield &opt x)\n\n"
-                         "Yield a value to a parent fiber. When a fiber yields, its execution is paused until "
-                         "another thread resumes it. The fiber will then resume, and the last yield call will "
-                         "return the value that was passed to resume."));
+         "Yield a value to a parent fiber. When a fiber yields, its execution is paused until "
+         "another thread resumes it. The fiber will then resume, and the last yield call will "
+         "return the value that was passed to resume."));
     janet_quick_asm(env, JANET_FUN_CANCEL,
                     "cancel", 2, 2, 2, 2, cancel_asm, sizeof(cancel_asm),
                     JDOC("(cancel fiber err)\n\n"
-                         "Resume a fiber but have it immediately raise an error. This lets a programmer unwind a pending fiber. "
-                         "Returns the same result as resume."));
+         "Resume a fiber but have it immediately raise an error. This lets a programmer unwind a pending fiber. "
+         "Returns the same result as resume."));
     janet_quick_asm(env, JANET_FUN_RESUME,
                     "resume", 2, 1, 2, 2, resume_asm, sizeof(resume_asm),
                     JDOC("(resume fiber &opt x)\n\n"
-                         "Resume a new or suspended fiber and optionally pass in a value to the fiber that "
-                         "will be returned to the last yield in the case of a pending fiber, or the argument to "
-                         "the dispatch function in the case of a new fiber. Returns either the return result of "
-                         "the fiber's dispatch function, or the value from the next yield call in fiber."));
+         "Resume a new or suspended fiber and optionally pass in a value to the fiber that "
+         "will be returned to the last yield in the case of a pending fiber, or the argument to "
+         "the dispatch function in the case of a new fiber. Returns either the return result of "
+         "the fiber's dispatch function, or the value from the next yield call in fiber."));
     janet_quick_asm(env, JANET_FUN_IN,
                     "in", 3, 2, 3, 4, in_asm, sizeof(in_asm),
                     JDOC("(in ds key &opt dflt)\n\n"
-                         "Get value in ds at key, works on associative data structures. Arrays, tuples, tables, structs, "
-                         "strings, symbols, and buffers are all associative and can be used. Arrays, tuples, strings, buffers, "
-                         "and symbols must use integer keys that are in bounds or an error is raised. Structs and tables can "
-                         "take any value as a key except nil and will return nil or dflt if not found."));
+         "Get value in ds at key, works on associative data structures. Arrays, tuples, tables, structs, "
+         "strings, symbols, and buffers are all associative and can be used. Arrays, tuples, strings, buffers, "
+         "and symbols must use integer keys that are in bounds or an error is raised. Structs and tables can "
+         "take any value as a key except nil and will return nil or dflt if not found."));
     janet_quick_asm(env, JANET_FUN_GET,
                     "get", 3, 2, 3, 4, get_asm, sizeof(in_asm),
                     JDOC("(get ds key &opt dflt)\n\n"
-                         "Get the value mapped to key in data structure ds, and return dflt or nil if not found. "
-                         "Similar to in, but will not throw an error if the key is invalid for the data structure "
-                         "unless the data structure is an abstract type. In that case, the abstract type getter may throw "
-                         "an error."));
+         "Get the value mapped to key in data structure ds, and return dflt or nil if not found. "
+         "Similar to in, but will not throw an error if the key is invalid for the data structure "
+         "unless the data structure is an abstract type. In that case, the abstract type getter may throw "
+         "an error."));
     janet_quick_asm(env, JANET_FUN_PUT,
                     "put", 3, 3, 3, 3, put_asm, sizeof(put_asm),
                     JDOC("(put ds key value)\n\n"
-                         "Associate a key with a value in any mutable associative data structure. Indexed data structures "
-                         "(arrays and buffers) only accept non-negative integer keys, and will expand if an out of bounds "
-                         "value is provided. In an array, extra space will be filled with nils, and in a buffer, extra "
-                         "space will be filled with 0 bytes. In a table, putting a key that is contained in the table prototype "
-                         "will hide the association defined by the prototype, but will not mutate the prototype table. Putting "
-                         "a value nil into a table will remove the key from the table. Returns the data structure ds."));
+         "Associate a key with a value in any mutable associative data structure. Indexed data structures "
+         "(arrays and buffers) only accept non-negative integer keys, and will expand if an out of bounds "
+         "value is provided. In an array, extra space will be filled with nils, and in a buffer, extra "
+         "space will be filled with 0 bytes. In a table, putting a key that is contained in the table prototype "
+         "will hide the association defined by the prototype, but will not mutate the prototype table. Putting "
+         "a value nil into a table will remove the key from the table. Returns the data structure ds."));
     janet_quick_asm(env, JANET_FUN_LENGTH,
                     "length", 1, 1, 1, 1, length_asm, sizeof(length_asm),
                     JDOC("(length ds)\n\n"
-                         "Returns the length or count of a data structure in constant time as an integer. For "
-                         "structs and tables, returns the number of key-value pairs in the data structure."));
+         "Returns the length or count of a data structure in constant time as an integer. For "
+         "structs and tables, returns the number of key-value pairs in the data structure."));
     janet_quick_asm(env, JANET_FUN_BNOT,
                     "bnot", 1, 1, 1, 1, bnot_asm, sizeof(bnot_asm),
                     JDOC("(bnot x)\n\nReturns the bit-wise inverse of integer x."));
@@ -1169,62 +1236,74 @@ JanetTable *janet_core_env(JanetTable *replacements) {
     /* Variadic ops */
     templatize_varop(env, JANET_FUN_ADD, "+", 0, 0, JOP_ADD,
                      JDOC("(+ & xs)\n\n"
-                          "Returns the sum of all xs. xs must be integers or real numbers only. If xs is empty, return 0."));
+         "Returns the sum of all xs. xs must be integers or real numbers only. If xs is empty, return 0."));
     templatize_varop(env, JANET_FUN_SUBTRACT, "-", 0, 0, JOP_SUBTRACT,
                      JDOC("(- & xs)\n\n"
-                          "Returns the difference of xs. If xs is empty, returns 0. If xs has one element, returns the "
-                          "negative value of that element. Otherwise, returns the first element in xs minus the sum of "
-                          "the rest of the elements."));
+         "Returns the difference of xs. If xs is empty, returns 0. If xs has one element, returns the "
+         "negative value of that element. Otherwise, returns the first element in xs minus the sum of "
+         "the rest of the elements."));
     templatize_varop(env, JANET_FUN_MULTIPLY, "*", 1, 1, JOP_MULTIPLY,
                      JDOC("(* & xs)\n\n"
-                          "Returns the product of all elements in xs. If xs is empty, returns 1."));
+         "Returns the product of all elements in xs. If xs is empty, returns 1."));
     templatize_varop(env, JANET_FUN_DIVIDE, "/", 1, 1, JOP_DIVIDE,
                      JDOC("(/ & xs)\n\n"
-                          "Returns the quotient of xs. If xs is empty, returns 1. If xs has one value x, returns "
-                          "the reciprocal of x. Otherwise return the first value of xs repeatedly divided by the remaining "
-                          "values."));
+         "Returns the quotient of xs. If xs is empty, returns 1. If xs has one value x, returns "
+         "the reciprocal of x. Otherwise return the first value of xs repeatedly divided by the remaining "
+         "values."));
+    templatize_varop(env, JANET_FUN_DIVIDE_FLOOR, "div", 1, 1, JOP_DIVIDE_FLOOR,
+                     JDOC("(div & xs)\n\n"
+         "Returns the floored division of xs. If xs is empty, returns 1. If xs has one value x, returns "
+         "the reciprocal of x. Otherwise return the first value of xs repeatedly divided by the remaining "
+         "values."));
+    templatize_varop(env, JANET_FUN_MODULO, "mod", 0, 1, JOP_MODULO,
+                     JDOC("(mod & xs)\n\n"
+         "Returns the result of applying the modulo operator on the first value of xs with each remaining value. "
+         "`(mod x 0)` is defined to be `x`."));
+    templatize_varop(env, JANET_FUN_REMAINDER, "%", 0, 1, JOP_REMAINDER,
+                     JDOC("(% & xs)\n\n"
+         "Returns the remainder of dividing the first value of xs by each remaining value."));
     templatize_varop(env, JANET_FUN_BAND, "band", -1, -1, JOP_BAND,
                      JDOC("(band & xs)\n\n"
-                          "Returns the bit-wise and of all values in xs. Each x in xs must be an integer."));
+         "Returns the bit-wise and of all values in xs. Each x in xs must be an integer."));
     templatize_varop(env, JANET_FUN_BOR, "bor", 0, 0, JOP_BOR,
                      JDOC("(bor & xs)\n\n"
-                          "Returns the bit-wise or of all values in xs. Each x in xs must be an integer."));
+         "Returns the bit-wise or of all values in xs. Each x in xs must be an integer."));
     templatize_varop(env, JANET_FUN_BXOR, "bxor", 0, 0, JOP_BXOR,
                      JDOC("(bxor & xs)\n\n"
-                          "Returns the bit-wise xor of all values in xs. Each in xs must be an integer."));
+         "Returns the bit-wise xor of all values in xs. Each in xs must be an integer."));
     templatize_varop(env, JANET_FUN_LSHIFT, "blshift", 1, 1, JOP_SHIFT_LEFT,
                      JDOC("(blshift x & shifts)\n\n"
-                          "Returns the value of x bit shifted left by the sum of all values in shifts. x "
-                          "and each element in shift must be an integer."));
+         "Returns the value of x bit shifted left by the sum of all values in shifts. x "
+         "and each element in shift must be an integer."));
     templatize_varop(env, JANET_FUN_RSHIFT, "brshift", 1, 1, JOP_SHIFT_RIGHT,
                      JDOC("(brshift x & shifts)\n\n"
-                          "Returns the value of x bit shifted right by the sum of all values in shifts. x "
-                          "and each element in shift must be an integer."));
+         "Returns the value of x bit shifted right by the sum of all values in shifts. x "
+         "and each element in shift must be an integer."));
     templatize_varop(env, JANET_FUN_RSHIFTU, "brushift", 1, 1, JOP_SHIFT_RIGHT_UNSIGNED,
                      JDOC("(brushift x & shifts)\n\n"
-                          "Returns the value of x bit shifted right by the sum of all values in shifts. x "
-                          "and each element in shift must be an integer. The sign of x is not preserved, so "
-                          "for positive shifts the return value will always be positive."));
+         "Returns the value of x bit shifted right by the sum of all values in shifts. x "
+         "and each element in shift must be an integer. The sign of x is not preserved, so "
+         "for positive shifts the return value will always be positive."));
 
     /* Variadic comparators */
     templatize_comparator(env, JANET_FUN_GT, ">", 0, JOP_GREATER_THAN,
                           JDOC("(> & xs)\n\n"
-                               "Check if xs is in descending order. Returns a boolean."));
+         "Check if xs is in descending order. Returns a boolean."));
     templatize_comparator(env, JANET_FUN_LT, "<", 0, JOP_LESS_THAN,
                           JDOC("(< & xs)\n\n"
-                               "Check if xs is in ascending order. Returns a boolean."));
+         "Check if xs is in ascending order. Returns a boolean."));
     templatize_comparator(env, JANET_FUN_GTE, ">=", 0, JOP_GREATER_THAN_EQUAL,
                           JDOC("(>= & xs)\n\n"
-                               "Check if xs is in non-ascending order. Returns a boolean."));
+         "Check if xs is in non-ascending order. Returns a boolean."));
     templatize_comparator(env, JANET_FUN_LTE, "<=", 0, JOP_LESS_THAN_EQUAL,
                           JDOC("(<= & xs)\n\n"
-                               "Check if xs is in non-descending order. Returns a boolean."));
+         "Check if xs is in non-descending order. Returns a boolean."));
     templatize_comparator(env, JANET_FUN_EQ, "=", 0, JOP_EQUALS,
                           JDOC("(= & xs)\n\n"
-                               "Check if all values in xs are equal. Returns a boolean."));
+         "Check if all values in xs are equal. Returns a boolean."));
     templatize_comparator(env, JANET_FUN_NEQ, "not=", 1, JOP_EQUALS,
                           JDOC("(not= & xs)\n\n"
-                               "Check if any values in xs are not equal. Returns a boolean."));
+         "Check if any values in xs are not equal. Returns a boolean."));
 
     /* Platform detection */
     janet_def(env, "janet/version", janet_cstringv(JANET_VERSION),
@@ -1233,7 +1312,7 @@ JanetTable *janet_core_env(JanetTable *replacements) {
               JDOC("The build identifier of the running janet program."));
     janet_def(env, "janet/config-bits", janet_wrap_integer(JANET_CURRENT_CONFIG_BITS),
               JDOC("The flag set of config options from janetconf.h which is used to check "
-                   "if native modules are compatible with the host program."));
+         "if native modules are compatible with the host program."));
 
     /* Allow references to the environment */
     janet_def(env, "root-env", janet_wrap_table(env),
